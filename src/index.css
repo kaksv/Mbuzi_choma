@@ -1,0 +1,25 @@
+@import 'tailwindcss';
+
+/* Tell Tailwind where to look for class names. */
+@source './**/*.{ts,tsx}';
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #fff7ed; /* amber-50 */
+  color: #0f172a; /* slate-900 */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Better UX on mobile (avoid the default tap highlight “flash”). */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+#root {
+  min-height: 100svh;
+}
