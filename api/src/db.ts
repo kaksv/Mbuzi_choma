@@ -1,29 +1,19 @@
 import pg from 'pg'
+import { parse as parsePgConn } from 'pg-connection-string'
 import 'dotenv/config'
 
 /**
- * Blueprint `connectionString` often uses a bare internal host `dpg-xxxxx-a` with no
- * dots. That name does not resolve over public DNS (ENOTFOUND) from many web runtimes.
- * Render's external hostname is `dpg-xxxxx-a.<region>-postgres.render.com`.
- *
- * Set RENDER_DATABASE_REGION to the same slug as your Postgres region (e.g. frankfurt,
- * oregon). DATABASE_EXTERNAL_URL (full URL from the dashboard) still wins and skips this.
+ * Expand Render's bare internal host `dpg-xxxxx-a` to a public DNS name.
+ * We avoid `new URL()` here: passwords may contain `#`, which starts a URL fragment
+ * and produces bogus hostnames like `base` (ENOTFOUND).
  */
 function expandBareRenderPostgresHost(connectionString: string): string {
-  try {
-    const asHttp = connectionString.replace(/^postgresql:\/\//i, 'http://').replace(/^postgres:\/\//i, 'http://')
-    const u = new URL(asHttp)
-    const host = u.hostname
-    if (host.includes('.') || !/^dpg-[a-z0-9]+-a$/i.test(host)) {
-      return connectionString
-    }
-    const region = process.env.RENDER_DATABASE_REGION?.toLowerCase().trim()
-    if (!region) return connectionString
-    u.hostname = `${host}.${region}-postgres.render.com`
-    return u.href.replace(/^http:\/\//i, 'postgresql://')
-  } catch {
-    return connectionString
-  }
+  const region = process.env.RENDER_DATABASE_REGION?.toLowerCase().trim()
+  if (!region) return connectionString
+  return connectionString.replace(
+    /@(dpg-[a-z0-9]+-a)(?=[/:?]|$)/gi,
+    `@$1.${region}-postgres.render.com`,
+  )
 }
 
 const rawUrl = process.env.DATABASE_EXTERNAL_URL ?? process.env.DATABASE_URL
@@ -35,15 +25,13 @@ if (!url) {
 
 function sslOption(connectionString: string): boolean | { rejectUnauthorized: boolean } {
   try {
-    const u = new URL(connectionString.replace(/^postgresql:/i, 'http:'))
-    const host = u.hostname
+    const { host } = parsePgConn(connectionString)
     if (host === 'localhost' || host === '127.0.0.1' || host === 'db') {
       return false
     }
   } catch {
     /* fall through */
   }
-  // Render and most cloud Postgres URLs require TLS; CA may not be in default trust store.
   return { rejectUnauthorized: false }
 }
 

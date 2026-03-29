@@ -18,7 +18,8 @@
     "@fastify/cors": "^11.2.0",
     "dotenv": "^16.6.1",
     "fastify": "^5.7.4",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "pg-connection-string": "^2.7.0"
   },
   "devDependencies": {
     "@types/node": "^24.12.0",
