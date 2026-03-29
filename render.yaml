@@ -7,6 +7,8 @@ databases:
     databaseName: mbuzzi
     user: mbuzzi
     plan: free
+    # Must match your web service region so the private DATABASE_URL works.
+    region: frankfurt
 
 services:
   - type: web
@@ -15,12 +17,16 @@ services:
     region: frankfurt
     plan: free
     rootDir: api
-    buildCommand: npm install && npm run build
+    # NODE_ENV=production during build skips devDependencies unless we include them.
+    # TypeScript lives in devDependencies, so this line is required for `tsc`.
+    buildCommand: npm install --include=dev && npm run build && npm prune --omit=dev
     startCommand: npm run start
     healthCheckPath: /api/health
     envVars:
-      - key: NODE_ENV
-        value: production
+      - key: NODE_VERSION
+        value: "22.14.0"
+      # Do not set NODE_ENV here — it can break the build (see buildCommand).
+      # Render sets NODE_ENV=production at runtime for web services.
       - key: DATABASE_URL
         fromDatabase:
           name: mbuzzi-postgres
