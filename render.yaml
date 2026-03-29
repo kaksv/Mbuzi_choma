@@ -1,18 +1,17 @@
 # Render Blueprint: connect this repo in the Render dashboard (New → Blueprint).
 # Docs: https://render.com/docs/infrastructure-as-code
 #
-# If deploy logs show ENOTFOUND dpg-... : the API expands bare internal hosts to
-# <host>.<RENDER_DATABASE_REGION>-postgres.render.com. Keep RENDER_DATABASE_REGION in
-# sync with databases.region (frankfurt, oregon, singapore, ohio, virginia).
-# Optional: set DATABASE_EXTERNAL_URL to the full External URL from Postgres → Connect.
+# RENDER_DATABASE_REGION must match the *Postgres* region (dashboard), not necessarily
+# the web service region. If they differ (API Frankfurt + DB Oregon), use the DB region
+# here so the dpg-… hostname expands to *.oregon-postgres.render.com (or whichever).
+# Optional: DATABASE_EXTERNAL_URL = full External URL from Postgres → Connect.
 
 databases:
   - name: mbuzzi-postgres
     databaseName: mbuzzi
     user: mbuzzi
     plan: free
-    # Must match your web service region so the private DATABASE_URL works.
-    region: frankfurt
+    region: oregon
 
 services:
   - type: web
@@ -29,9 +28,9 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22.14.0"
-      # Same region slug as `databases.region` above (fixes ENOTFOUND on internal dpg-…-a host).
+      # Postgres region from dashboard (yours is Oregon; API can stay in Frankfurt).
       - key: RENDER_DATABASE_REGION
-        value: frankfurt
+        value: oregon
       # Do not set NODE_ENV here — it can break the build (see buildCommand).
       # Render sets NODE_ENV=production at runtime for web services.
       - key: DATABASE_URL
