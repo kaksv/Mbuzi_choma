@@ -1,6 +1,10 @@
 # Render Blueprint: connect this repo in the Render dashboard (New → Blueprint).
-# Adjust region/plan names to match your Render account.
 # Docs: https://render.com/docs/infrastructure-as-code
+#
+# If deploy logs show ENOTFOUND dpg-... : the API expands bare internal hosts to
+# <host>.<RENDER_DATABASE_REGION>-postgres.render.com. Keep RENDER_DATABASE_REGION in
+# sync with databases.region (frankfurt, oregon, singapore, ohio, virginia).
+# Optional: set DATABASE_EXTERNAL_URL to the full External URL from Postgres → Connect.
 
 databases:
   - name: mbuzzi-postgres
@@ -25,6 +29,9 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22.14.0"
+      # Same region slug as `databases.region` above (fixes ENOTFOUND on internal dpg-…-a host).
+      - key: RENDER_DATABASE_REGION
+        value: frankfurt
       # Do not set NODE_ENV here — it can break the build (see buildCommand).
       # Render sets NODE_ENV=production at runtime for web services.
       - key: DATABASE_URL
