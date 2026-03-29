@@ -1,4 +1,5 @@
 import type { PoolClient } from 'pg'
+import { resolveProductPhotoUrl } from './mediaUrl.js'
 
 export type ProductRow = {
   id: string
@@ -40,7 +41,7 @@ export function productToJson(p: ProductRow) {
     title: p.title,
     weightKg: Number(p.weight_kg),
     priceUGX: p.price_ugx,
-    photoUrl: p.photo_url,
+    photoUrl: resolveProductPhotoUrl(p.photo_url),
     popular: p.popular,
   }
 }
