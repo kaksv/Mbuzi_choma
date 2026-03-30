@@ -1,4 +1,5 @@
 import type { MeatPackage } from '../types/package'
+import { resolveProductPhotoUrl } from '../lib/resolvePhotoUrl'
 import { formatUGX } from '../utils/formatUGX'
 
 type Props = {
@@ -11,7 +12,7 @@ export default function PackageCard({ pkg, onOrder }: Props) {
     <div className="bg-white rounded-2xl overflow-hidden shadow-lg border border-black/5">
       <div className="relative">
         <img
-          src={pkg.photoUrl}
+          src={resolveProductPhotoUrl(pkg.photoUrl)}
           alt={pkg.title}
           loading="lazy"
           className="w-full aspect-[4/3] object-cover"

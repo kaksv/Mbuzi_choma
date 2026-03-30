@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { SITE } from '../config'
 import { createOrder, fetchProduct } from '../lib/api'
+import { resolveProductPhotoUrl } from '../lib/resolvePhotoUrl'
 import { formatUGX } from '../utils/formatUGX'
 import type { MeatPackage } from '../types/package'
 
@@ -109,7 +110,7 @@ export default function OrderPage() {
         <div className="rounded-3xl overflow-hidden bg-white border border-black/5 shadow-lg">
           <div className="relative">
             <img
-              src={pkg.photoUrl}
+              src={resolveProductPhotoUrl(pkg.photoUrl)}
               alt={pkg.title}
               loading="lazy"
               className="w-full aspect-[16/9] object-cover"
