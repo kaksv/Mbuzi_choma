@@ -17,7 +17,7 @@ services:
   - type: web
     name: mbuzzi-api
     runtime: node
-    region: frankfurt
+    region: oregon
     plan: free
     rootDir: api
     # NODE_ENV=production during build skips devDependencies unless we include them.
