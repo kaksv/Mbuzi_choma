@@ -15,5 +15,6 @@ export type MeatOrder = {
   customer: CustomerInfo
   transactionRef?: string
   createdAtISO: string
+  status?: string
 }
 

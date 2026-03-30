@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { SITE } from '../config'
+import { fetchOrder } from '../lib/api'
 import { formatUGX } from '../utils/formatUGX'
-import { getOrder } from '../utils/orderStorage'
+import type { MeatOrder } from '../types/order'
 
 function buildWhatsappLink(text: string) {
   const raw = SITE.whatsappNumber.replace(/\D/g, '')
@@ -14,32 +15,91 @@ export default function SuccessPage() {
   const navigate = useNavigate()
   const { orderId } = useParams()
 
-  const order = useMemo(() => (orderId ? getOrder(orderId) : null), [orderId])
+  const [order, setOrder] = useState<MeatOrder | null>(null)
+  const [phase, setPhase] = useState<'loading' | 'ok' | 'missing' | 'error'>('loading')
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
 
-  const message = useMemo(() => {
-    if (!order) return ''
-    const lines = [
-      `Mbuzzi Choma - Order Confirmation`,
-      `Order ID: ${order.id}`,
-      `Package: ${order.packageTitle}`,
-      `Quantity: ${order.quantity}`,
-      `Total: ${formatUGX(order.totalUGX)}`,
-      `Customer: ${order.customer.fullName}`,
-      `Phone: ${order.customer.phone}`,
-      `Location: ${order.customer.location}`,
-      order.transactionRef ? `Transaction Ref: ${order.transactionRef}` : undefined,
-    ].filter(Boolean) as string[]
-    return lines.join('\n')
-  }, [order])
+  useEffect(() => {
+    if (!orderId) {
+      setPhase('missing')
+      return
+    }
+    let cancelled = false
+    setPhase('loading')
+    setLoadError(null)
+    fetchOrder(orderId)
+      .then((o) => {
+        if (cancelled) return
+        if (!o) {
+          setPhase('missing')
+          return
+        }
+        setOrder(o)
+        setPhase('ok')
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : 'Could not load order.')
+          setPhase('error')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [orderId])
 
-  if (!order) {
+  const message =
+    order == null
+      ? ''
+      : [
+          `Mbuzzi Choma - Order Confirmation`,
+          `Order ID: ${order.id}`,
+          `Package: ${order.packageTitle}`,
+          `Quantity: ${order.quantity}`,
+          `Total: ${formatUGX(order.totalUGX)}`,
+          `Customer: ${order.customer.fullName}`,
+          `Phone: ${order.customer.phone}`,
+          `Location: ${order.customer.location}`,
+          order.transactionRef ? `Transaction Ref: ${order.transactionRef}` : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n')
+
+  if (phase === 'loading') {
+    return (
+      <div className="pt-6 pb-10">
+        <div className="rounded-3xl bg-white border border-black/5 shadow-lg p-6 text-center text-slate-600 text-sm">
+          Loading order…
+        </div>
+      </div>
+    )
+  }
+
+  if (phase === 'error') {
+    return (
+      <div className="pt-6 pb-10">
+        <div className="rounded-3xl bg-white border border-black/5 shadow-lg p-4">
+          <div className="font-black text-slate-900">Couldn’t load order</div>
+          <div className="text-sm text-slate-600 mt-1">{loadError}</div>
+          <button
+            className="mt-4 w-full bg-black text-white font-bold py-3 rounded-xl"
+            onClick={() => navigate('/')}
+          >
+            Back to menu
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (phase === 'missing' || !order) {
     return (
       <div className="pt-6 pb-10">
         <div className="rounded-3xl bg-white border border-black/5 shadow-lg p-4">
           <div className="font-black text-slate-900">Order not found</div>
           <div className="text-sm text-slate-600 mt-1">
-            You may have cleared site storage or opened this link in a new browser.
+            Check the link or your order ID. If you just placed an order, make sure you’re online.
           </div>
           <button
             className="mt-4 w-full bg-black text-white font-bold py-3 rounded-xl"
@@ -121,7 +181,6 @@ export default function SuccessPage() {
                   setCopied(true)
                   window.setTimeout(() => setCopied(false), 1600)
                 } catch {
-                  // Fallback: select via prompt.
                   window.prompt('Copy your order message:', message)
                 }
               }}
@@ -142,4 +201,3 @@ export default function SuccessPage() {
     </div>
   )
 }
-

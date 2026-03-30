@@ -1,16 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { SITE } from '../config'
-import { meatPackages } from '../data/packages'
+import { createOrder, fetchProduct } from '../lib/api'
 import { formatUGX } from '../utils/formatUGX'
-import { saveOrder } from '../utils/orderStorage'
-import type { MeatOrder } from '../types/order'
-
-function makeOrderId() {
-  // crypto.randomUUID is widely supported in modern browsers.
-  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
-  return `order_${Date.now()}_${Math.random().toString(16).slice(2)}`
-}
+import type { MeatPackage } from '../types/package'
 
 function isProbablyPhoneUG(phone: string) {
   const digits = phone.replace(/\D/g, '')
@@ -21,7 +14,9 @@ export default function OrderPage() {
   const navigate = useNavigate()
   const { packageId } = useParams()
 
-  const pkg = useMemo(() => meatPackages.find((p) => p.id === packageId) ?? null, [packageId])
+  const [pkg, setPkg] = useState<MeatPackage | null>(null)
+  const [loadState, setLoadState] = useState<'loading' | 'ok' | 'missing' | 'error'>('loading')
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const [quantity, setQuantity] = useState(1)
   const [fullName, setFullName] = useState('')
@@ -31,10 +26,67 @@ export default function OrderPage() {
   const [notes, setNotes] = useState('')
 
   const [error, setError] = useState<string | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  useEffect(() => {
+    if (!packageId) {
+      setLoadState('missing')
+      return
+    }
+    let cancelled = false
+    setLoadState('loading')
+    setLoadError(null)
+    fetchProduct(packageId)
+      .then((p) => {
+        if (cancelled) return
+        if (!p) {
+          setLoadState('missing')
+          return
+        }
+        setPkg(p)
+        setLoadState('ok')
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : 'Could not load package.')
+          setLoadState('error')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [packageId])
 
   const totalUGX = pkg ? pkg.priceUGX * quantity : 0
 
-  if (!pkg) {
+  if (loadState === 'loading') {
+    return (
+      <div className="pt-6">
+        <div className="rounded-2xl bg-white border border-black/5 p-6 shadow-lg text-center text-slate-600 text-sm">
+          Loading package…
+        </div>
+      </div>
+    )
+  }
+
+  if (loadState === 'error') {
+    return (
+      <div className="pt-6">
+        <div className="rounded-2xl bg-white border border-black/5 p-4 shadow-lg">
+          <div className="font-black text-slate-900">Something went wrong</div>
+          <div className="text-sm text-slate-600 mt-1">{loadError}</div>
+          <button
+            className="mt-4 w-full bg-black text-white font-bold py-3 rounded-xl"
+            onClick={() => navigate('/')}
+          >
+            Back to menu
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (loadState === 'missing' || !pkg) {
     return (
       <div className="pt-6">
         <div className="rounded-2xl bg-white border border-black/5 p-4 shadow-lg">
@@ -114,7 +166,7 @@ export default function OrderPage() {
 
         <form
           className="rounded-3xl bg-white border border-black/5 shadow-lg p-4 space-y-3"
-          onSubmit={(e) => {
+          onSubmit={async (e) => {
             e.preventDefault()
             setError(null)
 
@@ -122,26 +174,25 @@ export default function OrderPage() {
             if (!isProbablyPhoneUG(phone)) return setError('Please enter a valid Ugandan phone number.')
             if (!location.trim()) return setError('Please enter your area/location.')
 
-            const orderId = makeOrderId()
-            const order: MeatOrder = {
-              id: orderId,
-              packageId: pkg.id,
-              packageTitle: pkg.title,
-              unitPriceUGX: pkg.priceUGX,
-              quantity,
-              totalUGX,
-              customer: {
-                fullName: fullName.trim(),
-                phone: phone.trim(),
-                location: location.trim(),
-                notes: notes.trim() ? notes.trim() : undefined,
-              },
-              transactionRef: transactionRef.trim() ? transactionRef.trim() : undefined,
-              createdAtISO: new Date().toISOString(),
+            setSubmitting(true)
+            try {
+              const order = await createOrder({
+                packageId: pkg.id,
+                quantity,
+                customer: {
+                  fullName: fullName.trim(),
+                  phone: phone.trim(),
+                  location: location.trim(),
+                  notes: notes.trim() ? notes.trim() : undefined,
+                },
+                transactionRef: transactionRef.trim() ? transactionRef.trim() : undefined,
+              })
+              navigate(`/success/${order.id}`)
+            } catch (err: unknown) {
+              setError(err instanceof Error ? err.message : 'Could not submit order.')
+            } finally {
+              setSubmitting(false)
             }
-
-            saveOrder(order)
-            navigate(`/success/${orderId}`)
           }}
         >
           <div className="flex items-center justify-between gap-3">
@@ -222,9 +273,10 @@ export default function OrderPage() {
 
           <button
             type="submit"
-            className="w-full bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white font-bold py-3 rounded-xl active:scale-[0.99] transition"
+            disabled={submitting}
+            className="w-full bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 disabled:opacity-60 text-white font-bold py-3 rounded-xl active:scale-[0.99] transition"
           >
-            Confirm order
+            {submitting ? 'Submitting…' : 'Confirm order'}
           </button>
           <div className="text-xs text-slate-500 text-center">
             By confirming, you’re submitting an order request to Mbuzzi Choma.
@@ -234,4 +286,3 @@ export default function OrderPage() {
     </div>
   )
 }
-

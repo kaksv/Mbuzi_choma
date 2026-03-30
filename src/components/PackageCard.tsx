@@ -1,4 +1,4 @@
-import type { MeatPackage } from '../data/packages'
+import type { MeatPackage } from '../types/package'
 import { formatUGX } from '../utils/formatUGX'
 
 type Props = {

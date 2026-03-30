@@ -1,13 +1,34 @@
-import { useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import PackageCard from '../components/PackageCard'
-import { meatPackages } from '../data/packages'
 import { SITE } from '../config'
+import { fetchProducts } from '../lib/api'
+import type { MeatPackage } from '../types/package'
 
 export default function HomePage() {
   const navigate = useNavigate()
+  const [packages, setPackages] = useState<MeatPackage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const packages = useMemo(() => meatPackages, [])
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    fetchProducts()
+      .then((list) => {
+        if (!cancelled) setPackages(list)
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Could not load menu.')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   return (
     <div className="pb-4">
@@ -39,15 +60,37 @@ export default function HomePage() {
           </div>
         </div>
 
-        <div className="mt-4 grid grid-cols-1 gap-4">
-          {packages.map((pkg) => (
-            <PackageCard
-              key={pkg.id}
-              pkg={pkg}
-              onOrder={() => navigate(`/order/${pkg.id}`)}
-            />
-          ))}
-        </div>
+        {loading ? (
+          <div className="mt-4 rounded-2xl bg-white border border-black/5 p-6 text-center text-slate-600 text-sm shadow-lg">
+            Loading menu…
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className="mt-4 rounded-2xl bg-red-50 border border-red-200 p-4 text-red-800 text-sm shadow-lg">
+            <div className="font-bold">Couldn’t load packages</div>
+            <div className="mt-1">{error}</div>
+            <button
+              type="button"
+              className="mt-3 w-full bg-black text-white font-bold py-2 rounded-xl text-sm"
+              onClick={() => window.location.reload()}
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
+
+        {!loading && !error ? (
+          <div className="mt-4 grid grid-cols-1 gap-4">
+            {packages.map((pkg) => (
+              <PackageCard
+                key={pkg.id}
+                pkg={pkg}
+                onOrder={() => navigate(`/order/${pkg.id}`)}
+              />
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="mt-6">
@@ -69,4 +112,3 @@ export default function HomePage() {
     </div>
   )
 }
-

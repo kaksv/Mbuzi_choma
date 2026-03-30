@@ -37,3 +37,6 @@ services:
         fromDatabase:
           name: mbuzzi-postgres
           property: connectionString
+      # Product images: DB holds public_ids; set to your Cloudinary cloud name (Dashboard).
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
