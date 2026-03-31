@@ -67,6 +67,8 @@ const app = Fastify({ logger: true })
 
 await app.register(cors, {
   origin: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-admin-key'],
 })
 
 app.get('/api/health', async () => ({ ok: true }))
