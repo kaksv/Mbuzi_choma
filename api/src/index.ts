@@ -1,5 +1,6 @@
 import cors from '@fastify/cors'
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
+import { v2 as cloudinary } from 'cloudinary'
 import { pool } from './db.js'
 import {
   getProductById,
@@ -42,6 +43,14 @@ function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
 
   reply.code(401).send({ error: 'Unauthorized' })
   return false
+}
+
+function cloudinaryConfig() {
+  const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim()
+  const apiKey = process.env.CLOUDINARY_API_KEY?.trim()
+  const apiSecret = process.env.CLOUDINARY_API_SECRET?.trim()
+  if (!cloudName || !apiKey || !apiSecret) return null
+  return { cloudName, apiKey, apiSecret }
 }
 
 const app = Fastify({ logger: true })
@@ -200,6 +209,57 @@ app.get('/api/admin/products', async (req, reply) => {
   })
 })
 
+type CreateProductBody = {
+  id?: string
+  title?: string
+  weightKg?: number
+  priceUGX?: number
+  photoUrl?: string
+  popular?: boolean
+  active?: boolean
+}
+
+app.post<{ Body: CreateProductBody }>('/api/admin/products', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const id = req.body?.id?.trim()
+  const title = req.body?.title?.trim()
+  const photoUrl = req.body?.photoUrl?.trim()
+  const weightKg = req.body?.weightKg
+  const priceUGX = req.body?.priceUGX
+  const popular = req.body?.popular ?? false
+  const active = req.body?.active ?? true
+
+  if (!id) return reply.code(400).send({ error: 'id is required' })
+  if (!/^[a-z0-9-]+$/.test(id)) {
+    return reply.code(400).send({ error: 'id must contain only lowercase letters, numbers, and dashes' })
+  }
+  if (!title) return reply.code(400).send({ error: 'title is required' })
+  if (!photoUrl) return reply.code(400).send({ error: 'photoUrl is required' })
+  if (typeof weightKg !== 'number' || Number.isNaN(weightKg) || weightKg <= 0) {
+    return reply.code(400).send({ error: 'weightKg must be a positive number' })
+  }
+  if (typeof priceUGX !== 'number' || !Number.isInteger(priceUGX) || priceUGX <= 0) {
+    return reply.code(400).send({ error: 'priceUGX must be a positive integer' })
+  }
+
+  const { rows } = await pool.query<AdminProductRow>(
+    `INSERT INTO products (id, title, weight_kg, price_ugx, photo_url, popular, active)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at`,
+    [id, title, weightKg, priceUGX, photoUrl, popular, active],
+  )
+
+  const row = rows[0]
+  reply.code(201).send({
+    product: {
+      ...productToJson(row),
+      active: row.active,
+      updatedAtISO: row.updated_at.toISOString(),
+    },
+  })
+})
+
 type UpdateProductBody = {
   title?: string
   weightKg?: number
@@ -232,7 +292,7 @@ app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/produ
   }
 
   if (priceUGX !== undefined) {
-    if (!Number.isInteger(priceUGX) || priceUGX <= 0) {
+    if (typeof priceUGX !== 'number' || !Number.isInteger(priceUGX) || priceUGX <= 0) {
       return reply.code(400).send({ error: 'priceUGX must be a positive integer' })
     }
     values.push(priceUGX)
@@ -278,6 +338,50 @@ app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/produ
       active: row.active,
       updatedAtISO: row.updated_at.toISOString(),
     },
+  })
+})
+
+type CloudinarySignBody = {
+  filename?: string
+  folder?: string
+}
+
+app.post<{ Body: CloudinarySignBody }>('/api/admin/cloudinary/sign', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const cfg = cloudinaryConfig()
+  if (!cfg) {
+    return reply.code(400).send({ error: 'Cloudinary credentials are not configured on the API' })
+  }
+
+  cloudinary.config({
+    cloud_name: cfg.cloudName,
+    api_key: cfg.apiKey,
+    api_secret: cfg.apiSecret,
+  })
+
+  const folder = req.body?.folder?.trim() || 'mbuzzi-choma'
+  const filename = req.body?.filename?.trim() || undefined
+  const publicId = filename
+    ? filename.toLowerCase().replace(/\.[a-z0-9]+$/i, '').replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+    : undefined
+  const timestamp = Math.floor(Date.now() / 1000)
+  const paramsToSign: Record<string, string | number | boolean> = {
+    folder,
+    timestamp,
+    overwrite: true,
+  }
+  if (publicId) paramsToSign.public_id = publicId
+
+  const signature = cloudinary.utils.api_sign_request(paramsToSign, cfg.apiSecret)
+
+  reply.send({
+    cloudName: cfg.cloudName,
+    apiKey: cfg.apiKey,
+    folder,
+    timestamp,
+    signature,
+    publicId,
   })
 })
 
