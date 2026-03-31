@@ -18,10 +18,20 @@ type OrderStatus = (typeof ORDER_STATUSES)[number]
 type AdminProductRow = ProductRow & {
   active: boolean
   updated_at: Date
+  deleted_at: Date | null
 }
 
 type AdminOrderRow = OrderRow & {
   package_title: string
+}
+
+function adminProductToJson(p: AdminProductRow) {
+  return {
+    ...productToJson(p),
+    active: p.active,
+    updatedAtISO: p.updated_at.toISOString(),
+    deletedAtISO: p.deleted_at ? p.deleted_at.toISOString() : null,
+  }
 }
 
 function isProbablyPhoneUG(phone: string) {
@@ -64,7 +74,7 @@ app.get('/api/health', async () => ({ ok: true }))
 app.get('/api/products', async (_req, reply) => {
   const { rows } = await pool.query<ProductRow>(
     `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular
-     FROM products WHERE active = true ORDER BY price_ugx ASC`,
+     FROM products WHERE active = true AND deleted_at IS NULL ORDER BY price_ugx ASC`,
   )
   reply.send({ products: rows.map(productToJson) })
 })
@@ -176,7 +186,7 @@ app.get('/api/admin/overview', async (req, reply) => {
   if (!requireAdmin(req, reply)) return
 
   const [{ rows: productsRows }, { rows: ordersTodayRows }, { rows: pendingRows }] = await Promise.all([
-    pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM products WHERE active = true'),
+    pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM products WHERE active = true AND deleted_at IS NULL'),
     pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM orders
        WHERE created_at >= date_trunc('day', now())`,
@@ -195,17 +205,14 @@ app.get('/api/admin/products', async (req, reply) => {
   if (!requireAdmin(req, reply)) return
 
   const { rows } = await pool.query<AdminProductRow>(
-    `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at
+    `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at
      FROM products
+     WHERE deleted_at IS NULL
      ORDER BY updated_at DESC`,
   )
 
   reply.send({
-    products: rows.map((p) => ({
-      ...productToJson(p),
-      active: p.active,
-      updatedAtISO: p.updated_at.toISOString(),
-    })),
+    products: rows.map(adminProductToJson),
   })
 })
 
@@ -246,17 +253,13 @@ app.post<{ Body: CreateProductBody }>('/api/admin/products', async (req, reply) 
   const { rows } = await pool.query<AdminProductRow>(
     `INSERT INTO products (id, title, weight_kg, price_ugx, photo_url, popular, active)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at`,
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at`,
     [id, title, weightKg, priceUGX, photoUrl, popular, active],
   )
 
   const row = rows[0]
   reply.code(201).send({
-    product: {
-      ...productToJson(row),
-      active: row.active,
-      updatedAtISO: row.updated_at.toISOString(),
-    },
+    product: adminProductToJson(row),
   })
 })
 
@@ -324,8 +327,8 @@ app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/produ
   const { rows } = await pool.query<AdminProductRow>(
     `UPDATE products
      SET ${sets.join(', ')}, updated_at = now()
-     WHERE id = $${values.length}
-     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at`,
+     WHERE id = $${values.length} AND deleted_at IS NULL
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at`,
     values,
   )
 
@@ -333,11 +336,7 @@ app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/produ
   if (!row) return reply.code(404).send({ error: 'Product not found' })
 
   reply.send({
-    product: {
-      ...productToJson(row),
-      active: row.active,
-      updatedAtISO: row.updated_at.toISOString(),
-    },
+    product: adminProductToJson(row),
   })
 })
 
@@ -383,6 +382,71 @@ app.post<{ Body: CloudinarySignBody }>('/api/admin/cloudinary/sign', async (req,
     signature,
     publicId,
   })
+})
+
+app.get('/api/admin/products/trash', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { rows } = await pool.query<AdminProductRow>(
+    `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at
+     FROM products
+     WHERE deleted_at IS NOT NULL
+     ORDER BY deleted_at DESC`,
+  )
+
+  reply.send({ products: rows.map(adminProductToJson) })
+})
+
+app.delete<{ Params: { id: string } }>('/api/admin/products/:id', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { rows } = await pool.query<AdminProductRow>(
+    `UPDATE products
+     SET deleted_at = now(), updated_at = now(), active = false
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at`,
+    [req.params.id],
+  )
+  const row = rows[0]
+  if (!row) return reply.code(404).send({ error: 'Product not found (or already in trash)' })
+
+  reply.send({ product: adminProductToJson(row) })
+})
+
+app.post<{ Params: { id: string } }>('/api/admin/products/:id/restore', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { rows } = await pool.query<AdminProductRow>(
+    `UPDATE products
+     SET deleted_at = NULL, updated_at = now()
+     WHERE id = $1 AND deleted_at IS NOT NULL
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at`,
+    [req.params.id],
+  )
+  const row = rows[0]
+  if (!row) return reply.code(404).send({ error: 'Product not found in trash' })
+
+  reply.send({ product: adminProductToJson(row) })
+})
+
+app.delete<{ Params: { id: string } }>('/api/admin/products/:id/permanent', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { rows: refs } = await pool.query<{ count: string }>(
+    'SELECT COUNT(*)::text AS count FROM orders WHERE product_id = $1',
+    [req.params.id],
+  )
+  if (Number(refs[0]?.count ?? '0') > 0) {
+    return reply.code(409).send({ error: 'Cannot permanently delete a product that has orders' })
+  }
+
+  const { rowCount } = await pool.query(
+    'DELETE FROM products WHERE id = $1 AND deleted_at IS NOT NULL',
+    [req.params.id],
+  )
+  if (!rowCount) return reply.code(404).send({ error: 'Product not found in trash' })
+
+  reply.send({ ok: true })
 })
 
 type AdminOrdersQuery = {

@@ -29,7 +29,7 @@ export type OrderRow = {
 export async function getProductById(client: PoolClient, id: string): Promise<ProductRow | null> {
   const { rows } = await client.query<ProductRow>(
     `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular
-     FROM products WHERE id = $1 AND active = true`,
+     FROM products WHERE id = $1 AND active = true AND deleted_at IS NULL`,
     [id],
   )
   return rows[0] ?? null
