@@ -1,5 +1,5 @@
 import cors from '@fastify/cors'
-import Fastify from 'fastify'
+import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import { pool } from './db.js'
 import {
   getProductById,
@@ -10,10 +10,38 @@ import {
 } from './types.js'
 
 const MAX_QTY = 20
+const ORDER_STATUSES = ['pending', 'confirmed', 'cancelled'] as const
+
+type OrderStatus = (typeof ORDER_STATUSES)[number]
+
+type AdminProductRow = ProductRow & {
+  active: boolean
+  updated_at: Date
+}
+
+type AdminOrderRow = OrderRow & {
+  package_title: string
+}
 
 function isProbablyPhoneUG(phone: string) {
   const digits = phone.replace(/\D/g, '')
   return digits.length >= 9 && digits.length <= 15
+}
+
+function isOrderStatus(v: string): v is OrderStatus {
+  return (ORDER_STATUSES as readonly string[]).includes(v)
+}
+
+function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
+  const configured = process.env.ADMIN_API_KEY?.trim()
+  if (!configured) return true
+
+  const header = req.headers['x-admin-key']
+  const provided = (Array.isArray(header) ? header[0] : header)?.trim()
+  if (provided === configured) return true
+
+  reply.code(401).send({ error: 'Unauthorized' })
+  return false
 }
 
 const app = Fastify({ logger: true })
@@ -130,6 +158,197 @@ app.get<{ Params: { id: string } }>('/api/orders/:id', async (req, reply) => {
      WHERE o.id = $1`,
     [req.params.id],
   )
+  const row = rows[0]
+  if (!row) return reply.code(404).send({ error: 'Order not found' })
+  reply.send({ order: orderToJson(row) })
+})
+
+app.get('/api/admin/overview', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const [{ rows: productsRows }, { rows: ordersTodayRows }, { rows: pendingRows }] = await Promise.all([
+    pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM products WHERE active = true'),
+    pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM orders
+       WHERE created_at >= date_trunc('day', now())`,
+    ),
+    pool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM orders WHERE status = 'pending'"),
+  ])
+
+  reply.send({
+    products: Number(productsRows[0]?.count ?? '0'),
+    ordersToday: Number(ordersTodayRows[0]?.count ?? '0'),
+    pending: Number(pendingRows[0]?.count ?? '0'),
+  })
+})
+
+app.get('/api/admin/products', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { rows } = await pool.query<AdminProductRow>(
+    `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at
+     FROM products
+     ORDER BY updated_at DESC`,
+  )
+
+  reply.send({
+    products: rows.map((p) => ({
+      ...productToJson(p),
+      active: p.active,
+      updatedAtISO: p.updated_at.toISOString(),
+    })),
+  })
+})
+
+type UpdateProductBody = {
+  title?: string
+  weightKg?: number
+  priceUGX?: number
+  photoUrl?: string
+  popular?: boolean
+  active?: boolean
+}
+
+app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/products/:id', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const { title, weightKg, priceUGX, photoUrl, popular, active } = req.body ?? {}
+  const sets: string[] = []
+  const values: Array<string | number | boolean> = []
+
+  if (title !== undefined) {
+    const t = title.trim()
+    if (!t) return reply.code(400).send({ error: 'title cannot be empty' })
+    values.push(t)
+    sets.push(`title = $${values.length}`)
+  }
+
+  if (weightKg !== undefined) {
+    if (typeof weightKg !== 'number' || Number.isNaN(weightKg) || weightKg <= 0) {
+      return reply.code(400).send({ error: 'weightKg must be a positive number' })
+    }
+    values.push(weightKg)
+    sets.push(`weight_kg = $${values.length}`)
+  }
+
+  if (priceUGX !== undefined) {
+    if (!Number.isInteger(priceUGX) || priceUGX <= 0) {
+      return reply.code(400).send({ error: 'priceUGX must be a positive integer' })
+    }
+    values.push(priceUGX)
+    sets.push(`price_ugx = $${values.length}`)
+  }
+
+  if (photoUrl !== undefined) {
+    const p = photoUrl.trim()
+    if (!p) return reply.code(400).send({ error: 'photoUrl cannot be empty' })
+    values.push(p)
+    sets.push(`photo_url = $${values.length}`)
+  }
+
+  if (popular !== undefined) {
+    values.push(popular)
+    sets.push(`popular = $${values.length}`)
+  }
+
+  if (active !== undefined) {
+    values.push(active)
+    sets.push(`active = $${values.length}`)
+  }
+
+  if (sets.length === 0) {
+    return reply.code(400).send({ error: 'No fields provided for update' })
+  }
+
+  values.push(req.params.id)
+  const { rows } = await pool.query<AdminProductRow>(
+    `UPDATE products
+     SET ${sets.join(', ')}, updated_at = now()
+     WHERE id = $${values.length}
+     RETURNING id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at`,
+    values,
+  )
+
+  const row = rows[0]
+  if (!row) return reply.code(404).send({ error: 'Product not found' })
+
+  reply.send({
+    product: {
+      ...productToJson(row),
+      active: row.active,
+      updatedAtISO: row.updated_at.toISOString(),
+    },
+  })
+})
+
+type AdminOrdersQuery = {
+  status?: string
+  limit?: string
+}
+
+app.get<{ Querystring: AdminOrdersQuery }>('/api/admin/orders', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const status = req.query.status?.trim()
+  const limitRaw = req.query.limit?.trim()
+  const limit = limitRaw ? Number(limitRaw) : 50
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    return reply.code(400).send({ error: 'limit must be an integer between 1 and 500' })
+  }
+
+  const values: Array<string | number> = []
+  let where = ''
+  if (status) {
+    if (!isOrderStatus(status)) {
+      return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
+    }
+    values.push(status)
+    where = `WHERE o.status = $${values.length}`
+  }
+
+  values.push(limit)
+  const { rows } = await pool.query<AdminOrderRow>(
+    `SELECT
+      o.id, o.product_id, o.quantity, o.unit_price_ugx, o.total_ugx,
+      o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+      o.status, o.created_at,
+      p.title AS package_title
+     FROM orders o
+     JOIN products p ON p.id = o.product_id
+     ${where}
+     ORDER BY o.created_at DESC
+     LIMIT $${values.length}`,
+    values,
+  )
+
+  reply.send({ orders: rows.map(orderToJson) })
+})
+
+type UpdateOrderStatusBody = {
+  status?: string
+}
+
+app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return
+
+  const status = req.body?.status?.trim()
+  if (!status || !isOrderStatus(status)) {
+    return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
+  }
+
+  const { rows } = await pool.query<AdminOrderRow>(
+    `UPDATE orders o
+     SET status = $1
+     FROM products p
+     WHERE o.id = $2 AND p.id = o.product_id
+     RETURNING
+       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.total_ugx,
+       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+       o.status, o.created_at,
+       p.title AS package_title`,
+    [status, req.params.id],
+  )
+
   const row = rows[0]
   if (!row) return reply.code(404).send({ error: 'Order not found' })
   reply.send({ order: orderToJson(row) })
