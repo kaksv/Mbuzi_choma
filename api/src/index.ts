@@ -1027,28 +1027,12 @@ type UpdateOrderStatusBody = {
 }
 
 app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
-  const session = requireAnyPermission(req, reply, ['orders:write', 'orders:status:delivery'])
+  const session = requirePermission(req, reply, 'orders:write')
   if (!session) return
 
   const status = req.body?.status?.trim()
   if (!status || !isOrderStatus(status)) {
     return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
-  }
-
-  const canFullManage = hasPermission(session, 'orders:write')
-  if (!canFullManage) {
-    if (status !== 'confirmed') {
-      return reply.code(403).send({ error: 'Delivery personnel can only mark orders as confirmed' })
-    }
-    const { rows: existingRows } = await pool.query<{ status: string }>(
-      'SELECT status FROM orders WHERE id = $1::uuid LIMIT 1',
-      [req.params.id],
-    )
-    const existing = existingRows[0]
-    if (!existing) return reply.code(404).send({ error: 'Order not found' })
-    if (existing.status !== 'pending') {
-      return reply.code(409).send({ error: 'Only pending orders can be confirmed by delivery personnel' })
-    }
   }
 
   const { rows } = await pool.query<AdminOrderRow>(
@@ -1088,7 +1072,7 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
 })
 
 app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, reply) => {
-  const session = requireAnyPermission(req, reply, ['orders:status:delivery', 'orders:write'])
+  const session = requireAnyPermission(req, reply, ['orders:delivery:write', 'orders:write'])
   if (!session) return
 
   const { rows } = await pool.query<AdminOrderRow>(
@@ -1146,7 +1130,7 @@ type UpdateDeliveryStatusBody = {
 app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
   '/api/admin/orders/:id/delivery-status',
   async (req, reply) => {
-    const session = requireAnyPermission(req, reply, ['orders:status:delivery', 'orders:write'])
+    const session = requireAnyPermission(req, reply, ['orders:delivery:write', 'orders:write'])
     if (!session) return
     const status = req.body?.status?.trim() ?? ''
     const notes = req.body?.notes?.trim() ?? ''
