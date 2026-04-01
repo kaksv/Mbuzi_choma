@@ -22,6 +22,18 @@ export type OrderRow = {
   payment_method: string
   payment_status: string
   pesapal_order_tracking_id: string | null
+  assigned_delivery_user_id: string | null
+  assigned_at: Date | null
+  delivery_status: string
+  delivery_notes: string | null
+  delivery_updated_at: Date | null
+  delivery_updated_by: string | null
+  verification_status: string
+  verified_at: Date | null
+  verified_by: string | null
+  verification_notes: string | null
+  assigned_delivery_full_name: string | null
+  assigned_delivery_email: string | null
   customer_full_name: string
   customer_phone: string
   customer_location: string
@@ -68,6 +80,28 @@ export function orderToJson(o: OrderRow) {
     paymentMethod: o.payment_method as 'pesapal' | 'cash_on_delivery',
     paymentStatus: o.payment_status as 'pending' | 'paid' | 'failed',
     pesapalOrderTrackingId: o.pesapal_order_tracking_id ?? undefined,
+    assignedDelivery: o.assigned_delivery_user_id
+      ? {
+          id: o.assigned_delivery_user_id,
+          fullName: o.assigned_delivery_full_name ?? 'Delivery Person',
+          email: o.assigned_delivery_email ?? '',
+        }
+      : undefined,
+    assignedAtISO: o.assigned_at ? o.assigned_at.toISOString() : undefined,
+    deliveryStatus: o.delivery_status as
+      | 'unassigned'
+      | 'assigned'
+      | 'out_for_delivery'
+      | 'delivered'
+      | 'not_delivered',
+    deliveryNotes: o.delivery_notes ?? undefined,
+    deliveryUpdatedAtISO: o.delivery_updated_at ? o.delivery_updated_at.toISOString() : undefined,
+    verificationStatus: o.verification_status as
+      | 'pending_verification'
+      | 'verified_delivered'
+      | 'verified_failed',
+    verificationNotes: o.verification_notes ?? undefined,
+    verifiedAtISO: o.verified_at ? o.verified_at.toISOString() : undefined,
     customer: {
       fullName: o.customer_full_name,
       phone: o.customer_phone,

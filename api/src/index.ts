@@ -28,6 +28,8 @@ const MAX_QTY = 20
 const FULFILLMENT_TYPES = ['pickup', 'delivery', 'delivery_pending'] as const
 const PAYMENT_METHODS = ['pesapal', 'cash_on_delivery'] as const
 const ORDER_STATUSES = ['pending', 'confirmed', 'cancelled'] as const
+const DELIVERY_STATUSES = ['unassigned', 'assigned', 'out_for_delivery', 'delivered', 'not_delivered'] as const
+const VERIFICATION_STATUSES = ['pending_verification', 'verified_delivered', 'verified_failed'] as const
 
 type OrderStatus = (typeof ORDER_STATUSES)[number]
 
@@ -68,6 +70,14 @@ function isProbablyPhoneUG(phone: string) {
 
 function isOrderStatus(v: string): v is OrderStatus {
   return (ORDER_STATUSES as readonly string[]).includes(v)
+}
+
+function isDeliveryStatus(v: string): v is (typeof DELIVERY_STATUSES)[number] {
+  return (DELIVERY_STATUSES as readonly string[]).includes(v)
+}
+
+function isVerificationStatus(v: string): v is (typeof VERIFICATION_STATUSES)[number] {
+  return (VERIFICATION_STATUSES as readonly string[]).includes(v)
 }
 
 function isFulfillmentType(v: string): v is (typeof FULFILLMENT_TYPES)[number] {
@@ -291,6 +301,11 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
       RETURNING
         id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
         fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
+        assigned_delivery_user_id, assigned_at, delivery_status, delivery_notes,
+        delivery_updated_at, delivery_updated_by,
+        verification_status, verified_at, verified_by, verification_notes,
+        NULL::text AS assigned_delivery_full_name,
+        NULL::text AS assigned_delivery_email,
         customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
         status, created_at,
         (SELECT title FROM products WHERE id = product_id) AS package_title`,
@@ -350,10 +365,18 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
         `SELECT
           o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
           o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+          o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+          o.delivery_updated_at, o.delivery_updated_by,
+          o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+          du.full_name AS assigned_delivery_full_name,
+          du.email AS assigned_delivery_email,
           o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
           o.status, o.created_at,
           p.title AS package_title
-         FROM orders o JOIN products p ON p.id = o.product_id WHERE o.id = $1`,
+         FROM orders o
+         JOIN products p ON p.id = o.product_id
+         LEFT JOIN admin_users du ON du.id = o.assigned_delivery_user_id
+         WHERE o.id = $1`,
         [orderRow.id],
       )
       const final = outRows[0]
@@ -382,11 +405,17 @@ app.get<{ Params: { id: string } }>('/api/orders/:id', async (req, reply) => {
     `SELECT
       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
       o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+      o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+      o.delivery_updated_at, o.delivery_updated_by,
+      o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+      du.full_name AS assigned_delivery_full_name,
+      du.email AS assigned_delivery_email,
       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
       o.status, o.created_at,
       p.title AS package_title
      FROM orders o
      JOIN products p ON p.id = o.product_id
+     LEFT JOIN admin_users du ON du.id = o.assigned_delivery_user_id
      WHERE o.id = $1`,
     [req.params.id],
   )
@@ -973,11 +1002,17 @@ app.get<{ Querystring: AdminOrdersQuery }>('/api/admin/orders', async (req, repl
     `SELECT
       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
       o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+      o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+      o.delivery_updated_at, o.delivery_updated_by,
+      o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+      du.full_name AS assigned_delivery_full_name,
+      du.email AS assigned_delivery_email,
       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
       o.status, o.created_at,
       p.title AS package_title
      FROM orders o
      JOIN products p ON p.id = o.product_id
+     LEFT JOIN admin_users du ON du.id = o.assigned_delivery_user_id
      ${where}
      ORDER BY o.created_at DESC
      LIMIT $${values.length}`,
@@ -1024,17 +1059,26 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
        RETURNING
          id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
          fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
+         assigned_delivery_user_id, assigned_at, delivery_status, delivery_notes,
+         delivery_updated_at, delivery_updated_by,
+         verification_status, verified_at, verified_by, verification_notes,
          customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
          status, created_at
      )
      SELECT
        u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
        u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+       u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
+       u.delivery_updated_at, u.delivery_updated_by,
+       u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
+       du.full_name AS assigned_delivery_full_name,
+       du.email AS assigned_delivery_email,
        u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
        u.status, u.created_at,
        p.title AS package_title
      FROM updated u
-     JOIN products p ON p.id = u.product_id`,
+     JOIN products p ON p.id = u.product_id
+     LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
     [status, req.params.id],
   )
 
@@ -1042,6 +1086,178 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
   if (!row) return reply.code(404).send({ error: 'Order not found' })
   reply.send({ order: orderToJson(row) })
 })
+
+app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, reply) => {
+  const session = requireAnyPermission(req, reply, ['orders:status:delivery', 'orders:write'])
+  if (!session) return
+
+  const { rows } = await pool.query<AdminOrderRow>(
+    `WITH base AS (
+       SELECT id, status, assigned_delivery_user_id
+       FROM orders
+       WHERE id = $1::uuid
+     ),
+     updated AS (
+       UPDATE orders o
+       SET assigned_delivery_user_id = $2::uuid,
+           assigned_at = COALESCE(o.assigned_at, now()),
+           delivery_status = CASE WHEN o.delivery_status = 'unassigned' THEN 'assigned' ELSE o.delivery_status END,
+           delivery_updated_at = now(),
+           delivery_updated_by = $2::uuid
+       FROM base b
+       WHERE o.id = b.id
+         AND b.status = 'confirmed'
+         AND (b.assigned_delivery_user_id IS NULL OR b.assigned_delivery_user_id = $2::uuid)
+       RETURNING
+         o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+         o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+         o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+         o.delivery_updated_at, o.delivery_updated_by,
+         o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+         o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+         o.status, o.created_at
+     )
+     SELECT
+       u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
+       u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+       u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
+       u.delivery_updated_at, u.delivery_updated_by,
+       u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
+       du.full_name AS assigned_delivery_full_name,
+       du.email AS assigned_delivery_email,
+       u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
+       u.status, u.created_at,
+       p.title AS package_title
+     FROM updated u
+     JOIN products p ON p.id = u.product_id
+     LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
+    [req.params.id, session.userId],
+  )
+  const row = rows[0]
+  if (!row) return reply.code(409).send({ error: 'Order cannot be claimed (must be confirmed and unassigned or yours)' })
+  reply.send({ order: orderToJson(row) })
+})
+
+type UpdateDeliveryStatusBody = {
+  status?: string
+  notes?: string
+}
+
+app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
+  '/api/admin/orders/:id/delivery-status',
+  async (req, reply) => {
+    const session = requireAnyPermission(req, reply, ['orders:status:delivery', 'orders:write'])
+    if (!session) return
+    const status = req.body?.status?.trim() ?? ''
+    const notes = req.body?.notes?.trim() ?? ''
+    if (!isDeliveryStatus(status) || status === 'unassigned') {
+      return reply.code(400).send({ error: 'Invalid delivery status' })
+    }
+
+    const canFullManage = hasPermission(session, 'orders:write')
+    if (!canFullManage && !['out_for_delivery', 'delivered', 'not_delivered'].includes(status)) {
+      return reply.code(403).send({ error: 'Delivery personnel cannot set this delivery status' })
+    }
+
+    const { rows } = await pool.query<AdminOrderRow>(
+      `WITH updated AS (
+         UPDATE orders o
+         SET delivery_status = $1,
+             delivery_notes = CASE WHEN $2 = '' THEN o.delivery_notes ELSE $2 END,
+             delivery_updated_at = now(),
+             delivery_updated_by = $3::uuid
+         WHERE o.id = $4::uuid
+           AND o.status = 'confirmed'
+           AND (
+             $5::boolean = true
+             OR o.assigned_delivery_user_id = $3::uuid
+           )
+         RETURNING
+           o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+           o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+           o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+           o.delivery_updated_at, o.delivery_updated_by,
+           o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+           o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+           o.status, o.created_at
+       )
+       SELECT
+         u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
+         u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+         u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
+         u.delivery_updated_at, u.delivery_updated_by,
+         u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
+         du.full_name AS assigned_delivery_full_name,
+         du.email AS assigned_delivery_email,
+         u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
+         u.status, u.created_at,
+         p.title AS package_title
+       FROM updated u
+       JOIN products p ON p.id = u.product_id
+       LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
+      [status, notes, session.userId, req.params.id, canFullManage],
+    )
+    const row = rows[0]
+    if (!row) return reply.code(409).send({ error: 'Unable to update delivery status for this order' })
+    reply.send({ order: orderToJson(row) })
+  },
+)
+
+type VerifyDeliveryBody = {
+  outcome?: string
+  notes?: string
+}
+
+app.patch<{ Params: { id: string }; Body: VerifyDeliveryBody }>(
+  '/api/admin/orders/:id/verify-delivery',
+  async (req, reply) => {
+    if (!requirePermission(req, reply, 'orders:write')) return
+    const outcome = req.body?.outcome?.trim() ?? ''
+    const notes = req.body?.notes?.trim() ?? ''
+    if (!isVerificationStatus(outcome) || outcome === 'pending_verification') {
+      return reply.code(400).send({ error: 'Invalid verification outcome' })
+    }
+
+    const session = authFromRequest(req)!
+    const { rows } = await pool.query<AdminOrderRow>(
+      `WITH updated AS (
+         UPDATE orders o
+         SET verification_status = $1,
+             verification_notes = CASE WHEN $2 = '' THEN o.verification_notes ELSE $2 END,
+             verified_at = now(),
+             verified_by = $3::uuid
+         WHERE o.id = $4::uuid
+           AND o.delivery_status IN ('delivered', 'not_delivered')
+         RETURNING
+           o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+           o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+           o.assigned_delivery_user_id, o.assigned_at, o.delivery_status, o.delivery_notes,
+           o.delivery_updated_at, o.delivery_updated_by,
+           o.verification_status, o.verified_at, o.verified_by, o.verification_notes,
+           o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+           o.status, o.created_at
+       )
+       SELECT
+         u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
+         u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+         u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
+         u.delivery_updated_at, u.delivery_updated_by,
+         u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
+         du.full_name AS assigned_delivery_full_name,
+         du.email AS assigned_delivery_email,
+         u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
+         u.status, u.created_at,
+         p.title AS package_title
+       FROM updated u
+       JOIN products p ON p.id = u.product_id
+       LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
+      [outcome, notes, session.userId, req.params.id],
+    )
+    const row = rows[0]
+    if (!row) return reply.code(409).send({ error: 'Only delivered/not_delivered orders can be verified' })
+    reply.send({ order: orderToJson(row) })
+  },
+)
 
 const port = Number(process.env.PORT) || 3001
 await app.listen({ port, host: '0.0.0.0' })
