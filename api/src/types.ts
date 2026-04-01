@@ -15,7 +15,13 @@ export type OrderRow = {
   product_id: string
   quantity: number
   unit_price_ugx: number
+  subtotal_ugx: number
+  delivery_fee_ugx: number
   total_ugx: number
+  fulfillment_type: string
+  payment_method: string
+  payment_status: string
+  pesapal_order_tracking_id: string | null
   customer_full_name: string
   customer_phone: string
   customer_location: string
@@ -47,13 +53,21 @@ export function productToJson(p: ProductRow) {
 }
 
 export function orderToJson(o: OrderRow) {
+  const fulfillmentType = o.fulfillment_type as 'pickup' | 'delivery' | 'delivery_pending'
   return {
     id: o.id,
     packageId: o.product_id,
     packageTitle: o.package_title,
     unitPriceUGX: o.unit_price_ugx,
     quantity: o.quantity,
+    subtotalUGX: o.subtotal_ugx,
+    deliveryFeeUGX: o.delivery_fee_ugx,
     totalUGX: o.total_ugx,
+    fulfillmentType,
+    deliveryFeePending: fulfillmentType === 'delivery_pending',
+    paymentMethod: o.payment_method as 'pesapal' | 'cash_on_delivery',
+    paymentStatus: o.payment_status as 'pending' | 'paid' | 'failed',
+    pesapalOrderTrackingId: o.pesapal_order_tracking_id ?? undefined,
     customer: {
       fullName: o.customer_full_name,
       phone: o.customer_phone,

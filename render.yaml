@@ -46,3 +46,17 @@ services:
         sync: false
       - key: ADMIN_API_KEY
         sync: false
+      - key: DELIVERY_FEE_UGX
+        value: "5000"
+      - key: API_PUBLIC_URL
+        sync: false
+      - key: CUSTOMER_APP_URL
+        sync: false
+      - key: PESAPAL_ENVIRONMENT
+        sync: false
+      - key: PESAPAL_CONSUMER_KEY
+        sync: false
+      - key: PESAPAL_CONSUMER_SECRET
+        sync: false
+      - key: PESAPAL_IPN_NOTIFICATION_ID
+        sync: false

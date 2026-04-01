@@ -57,11 +57,20 @@ export default function SuccessPage() {
           `Order ID: ${order.id}`,
           `Package: ${order.packageTitle}`,
           `Quantity: ${order.quantity}`,
+          order.fulfillmentType ? `Fulfillment: ${order.fulfillmentType}` : undefined,
+          order.subtotalUGX != null ? `Subtotal: ${formatUGX(order.subtotalUGX)}` : undefined,
+          order.deliveryFeePending
+            ? 'Delivery fee: pending confirmation'
+            : order.deliveryFeeUGX != null && order.deliveryFeeUGX > 0
+              ? `Delivery: ${formatUGX(order.deliveryFeeUGX)}`
+              : undefined,
           `Total: ${formatUGX(order.totalUGX)}`,
+          order.paymentMethod ? `Payment: ${order.paymentMethod}` : undefined,
+          order.paymentStatus ? `Payment status: ${order.paymentStatus}` : undefined,
           `Customer: ${order.customer.fullName}`,
           `Phone: ${order.customer.phone}`,
           `Location: ${order.customer.location}`,
-          order.transactionRef ? `Transaction Ref: ${order.transactionRef}` : undefined,
+          order.transactionRef ? `Note: ${order.transactionRef}` : undefined,
         ]
           .filter(Boolean)
           .join('\n')
@@ -121,7 +130,11 @@ export default function SuccessPage() {
           <div className="text-emerald-600 font-black">Confirmed!</div>
           <div className="font-black text-slate-900 text-xl mt-1">We received your order request.</div>
           <div className="text-sm text-slate-600 mt-2">
-            Next: pay the UGX amount and share your Transaction ID if needed.
+            {order.paymentMethod === 'pesapal' && order.paymentStatus === 'paid'
+              ? 'Your payment was received. We’ll follow up on your order shortly.'
+              : order.paymentMethod === 'pesapal'
+                ? 'If you just paid, status may take a moment to update. You can refresh this page.'
+                : 'We’ll contact you to confirm delivery or pickup.'}
           </div>
         </div>
 
@@ -141,6 +154,23 @@ export default function SuccessPage() {
               <div className="text-slate-500">Quantity</div>
               <div className="font-bold text-slate-900 text-right">{order.quantity}</div>
             </div>
+            {order.subtotalUGX != null ? (
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-slate-500">Subtotal</div>
+                <div className="font-bold text-slate-900 text-right">{formatUGX(order.subtotalUGX)}</div>
+              </div>
+            ) : null}
+            {order.deliveryFeePending ? (
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-slate-500">Delivery</div>
+                <div className="font-bold text-slate-900 text-right">Pending quote</div>
+              </div>
+            ) : order.deliveryFeeUGX != null && order.deliveryFeeUGX > 0 ? (
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-slate-500">Delivery</div>
+                <div className="font-bold text-slate-900 text-right">{formatUGX(order.deliveryFeeUGX)}</div>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between gap-3">
               <div className="text-slate-500">Total</div>
               <div className="font-black text-slate-900 text-right">{formatUGX(order.totalUGX)}</div>
@@ -148,12 +178,19 @@ export default function SuccessPage() {
           </div>
 
           <div className="mt-4 rounded-2xl bg-orange-50 border border-black/5 p-4">
-            <div className="font-black text-slate-900">Payment (UGX)</div>
-            <div className="text-sm text-slate-700 mt-1">
-              Pay <span className="font-bold">{formatUGX(order.totalUGX)}</span> to{' '}
-              <span className="font-bold">{SITE.payment.phoneForPayment}</span>.
-            </div>
-            <div className="text-sm text-slate-600 mt-1">{SITE.payment.methodLabel}</div>
+            <div className="font-black text-slate-900">Payment</div>
+            {order.paymentMethod === 'pesapal' ? (
+              <div className="text-sm text-slate-700 mt-1">
+                Pesapal —{' '}
+                <span className="font-bold capitalize">{order.paymentStatus ?? 'pending'}</span>
+                {order.paymentStatus === 'paid' ? ' (thank you)' : null}.
+              </div>
+            ) : (
+              <div className="text-sm text-slate-700 mt-1">
+                Cash on delivery. Have <span className="font-bold">{formatUGX(order.totalUGX)}</span> ready for the rider
+                {order.deliveryFeePending ? ' (delivery fee may change once we confirm your area)' : ''}.
+              </div>
+            )}
           </div>
         </div>
 

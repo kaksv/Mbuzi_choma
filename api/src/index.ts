@@ -3,6 +3,11 @@ import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import { v2 as cloudinary } from 'cloudinary'
 import { pool } from './db.js'
 import {
+  getPesapalTransactionStatus,
+  pesapalConfigured,
+  submitPesapalOrder,
+} from './pesapal.js'
+import {
   getProductById,
   orderToJson,
   productToJson,
@@ -11,6 +16,8 @@ import {
 } from './types.js'
 
 const MAX_QTY = 20
+const FULFILLMENT_TYPES = ['pickup', 'delivery', 'delivery_pending'] as const
+const PAYMENT_METHODS = ['pesapal', 'cash_on_delivery'] as const
 const ORDER_STATUSES = ['pending', 'confirmed', 'cancelled'] as const
 
 type OrderStatus = (typeof ORDER_STATUSES)[number]
@@ -43,6 +50,43 @@ function isOrderStatus(v: string): v is OrderStatus {
   return (ORDER_STATUSES as readonly string[]).includes(v)
 }
 
+function isFulfillmentType(v: string): v is (typeof FULFILLMENT_TYPES)[number] {
+  return (FULFILLMENT_TYPES as readonly string[]).includes(v)
+}
+
+function isPaymentMethod(v: string): v is (typeof PAYMENT_METHODS)[number] {
+  return (PAYMENT_METHODS as readonly string[]).includes(v)
+}
+
+function deliveryFeeUgx(): number {
+  const n = Number(process.env.DELIVERY_FEE_UGX ?? '5000')
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5000
+}
+
+function computeDeliveryFee(fulfillment: (typeof FULFILLMENT_TYPES)[number]): number {
+  if (fulfillment === 'delivery') return deliveryFeeUgx()
+  return 0
+}
+
+function splitCustomerName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return { firstName: 'Customer', lastName: '-' }
+  if (parts.length === 1) return { firstName: parts[0]!, lastName: '-' }
+  return { firstName: parts[0]!, lastName: parts.slice(1).join(' ') }
+}
+
+async function applyPesapalPaymentToOrder(orderId: string, orderTrackingId: string): Promise<void> {
+  const st = await getPesapalTransactionStatus(orderTrackingId)
+  if (st.merchantReference && st.merchantReference !== orderId) {
+    throw new Error('Pesapal merchant reference does not match order')
+  }
+  const paymentStatus = st.statusCode === 1 ? 'paid' : st.statusCode === 2 ? 'failed' : 'pending'
+  await pool.query(
+    `UPDATE orders SET payment_status = $1 WHERE id = $2::uuid AND pesapal_order_tracking_id = $3`,
+    [paymentStatus, orderId, orderTrackingId],
+  )
+}
+
 function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
   const configured = process.env.ADMIN_API_KEY?.trim()
   if (!configured) return true
@@ -73,6 +117,13 @@ await app.register(cors, {
 
 app.get('/api/health', async () => ({ ok: true }))
 
+app.get('/api/checkout-config', async (_req, reply) => {
+  reply.send({
+    currency: 'UGX',
+    deliveryFeeUGX: deliveryFeeUgx(),
+  })
+})
+
 app.get('/api/products', async (_req, reply) => {
   const { rows } = await pool.query<ProductRow>(
     `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular
@@ -95,6 +146,8 @@ app.get<{ Params: { id: string } }>('/api/products/:id', async (req, reply) => {
 type CreateOrderBody = {
   packageId?: string
   quantity?: number
+  fulfillmentType?: string
+  paymentMethod?: string
   customer?: {
     fullName?: string
     phone?: string
@@ -105,22 +158,50 @@ type CreateOrderBody = {
 }
 
 app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
-  const { packageId, quantity, customer, transactionRef } = req.body ?? {}
+  const { packageId, quantity, customer, transactionRef, fulfillmentType: ftRaw, paymentMethod: pmRaw } =
+    req.body ?? {}
   const fullName = customer?.fullName?.trim()
   const phone = customer?.phone?.trim()
   const location = customer?.location?.trim()
   const notes = customer?.notes?.trim()
   const tx = transactionRef?.trim()
 
+  const fulfillmentType = typeof ftRaw === 'string' ? ftRaw.trim() : ''
+  const paymentMethod = typeof pmRaw === 'string' ? pmRaw.trim() : ''
+
   if (!packageId) return reply.code(400).send({ error: 'packageId is required' })
   if (typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_QTY) {
     return reply.code(400).send({ error: `quantity must be an integer from 1 to ${MAX_QTY}` })
+  }
+  if (!fulfillmentType || !isFulfillmentType(fulfillmentType)) {
+    return reply.code(400).send({
+      error: `fulfillmentType must be one of: ${FULFILLMENT_TYPES.join(', ')}`,
+    })
+  }
+  if (!paymentMethod || !isPaymentMethod(paymentMethod)) {
+    return reply.code(400).send({
+      error: `paymentMethod must be one of: ${PAYMENT_METHODS.join(', ')}`,
+    })
   }
   if (!fullName) return reply.code(400).send({ error: 'customer.fullName is required' })
   if (!phone || !isProbablyPhoneUG(phone)) {
     return reply.code(400).send({ error: 'customer.phone must be a valid phone number' })
   }
   if (!location) return reply.code(400).send({ error: 'customer.location is required' })
+
+  if (paymentMethod === 'pesapal' && !pesapalConfigured()) {
+    return reply.code(503).send({
+      error: 'Online payment is not configured. Choose cash on delivery or try again later.',
+    })
+  }
+
+  const apiPublic = process.env.API_PUBLIC_URL?.trim()
+  const customerApp = process.env.CUSTOMER_APP_URL?.trim()
+  if (paymentMethod === 'pesapal' && (!apiPublic || !customerApp)) {
+    return reply.code(503).send({
+      error: 'Payment redirect URLs are not configured (API_PUBLIC_URL / CUSTOMER_APP_URL).',
+    })
+  }
 
   const client = await pool.connect()
   try {
@@ -132,15 +213,21 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
     }
 
     const unitPrice = product.price_ugx
-    const totalUGX = unitPrice * quantity
+    const subtotalUgx = unitPrice * quantity
+    const deliveryFee = computeDeliveryFee(fulfillmentType)
+    const totalUgx = subtotalUgx + deliveryFee
+    const paymentStatus = 'pending'
+    const notificationId = process.env.PESAPAL_IPN_NOTIFICATION_ID?.trim()
 
     const { rows } = await client.query<OrderRow>(
       `INSERT INTO orders (
-        product_id, quantity, unit_price_ugx, total_ugx,
+        product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
+        fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
         customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       RETURNING
-        id, product_id, quantity, unit_price_ugx, total_ugx,
+        id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
+        fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
         customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
         status, created_at,
         (SELECT title FROM products WHERE id = product_id) AS package_title`,
@@ -148,7 +235,13 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
         packageId,
         quantity,
         unitPrice,
-        totalUGX,
+        subtotalUgx,
+        deliveryFee,
+        totalUgx,
+        fulfillmentType,
+        paymentMethod,
+        paymentStatus,
+        null,
         fullName,
         phone,
         location,
@@ -156,9 +249,63 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
         tx || null,
       ],
     )
+    const orderRow = rows[0]
+    if (!orderRow) {
+      await client.query('ROLLBACK')
+      return reply.code(500).send({ error: 'Order was not created' })
+    }
+
+    if (paymentMethod === 'pesapal') {
+      const { firstName, lastName } = splitCustomerName(fullName)
+      const desc = `Mbuzzi Choma — ${product.title}`.slice(0, 100)
+      const callbackUrl = `${apiPublic}/api/payments/pesapal/callback`
+      const cancellationUrl = `${customerApp}/#/order/${encodeURIComponent(packageId)}?cancelled=1`
+
+      const { orderTrackingId, redirectUrl } = await submitPesapalOrder({
+        merchantReference: orderRow.id,
+        amount: totalUgx,
+        currency: 'UGX',
+        description: desc,
+        callbackUrl,
+        cancellationUrl,
+        notificationId: notificationId!,
+        customer: {
+          phone,
+          firstName,
+          lastName,
+          line1: location,
+        },
+      })
+
+      await client.query(`UPDATE orders SET pesapal_order_tracking_id = $1 WHERE id = $2`, [
+        orderTrackingId,
+        orderRow.id,
+      ])
+      await client.query('COMMIT')
+
+      const { rows: outRows } = await pool.query<OrderRow>(
+        `SELECT
+          o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+          o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
+          o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
+          o.status, o.created_at,
+          p.title AS package_title
+         FROM orders o JOIN products p ON p.id = o.product_id WHERE o.id = $1`,
+        [orderRow.id],
+      )
+      const final = outRows[0]
+      if (!final) {
+        return reply.code(500).send({ error: 'Order could not be reloaded' })
+      }
+      reply.code(201).send({
+        order: orderToJson(final),
+        pesapal: { redirectUrl },
+      })
+      return
+    }
+
     await client.query('COMMIT')
-    const order = rows[0]
-    reply.code(201).send({ order: orderToJson(order) })
+    reply.code(201).send({ order: orderToJson(orderRow) })
   } catch (e) {
     await client.query('ROLLBACK')
     throw e
@@ -170,7 +317,8 @@ app.post<{ Body: CreateOrderBody }>('/api/orders', async (req, reply) => {
 app.get<{ Params: { id: string } }>('/api/orders/:id', async (req, reply) => {
   const { rows } = await pool.query<OrderRow>(
     `SELECT
-      o.id, o.product_id, o.quantity, o.unit_price_ugx, o.total_ugx,
+      o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+      o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
       o.status, o.created_at,
       p.title AS package_title
@@ -182,6 +330,96 @@ app.get<{ Params: { id: string } }>('/api/orders/:id', async (req, reply) => {
   const row = rows[0]
   if (!row) return reply.code(404).send({ error: 'Order not found' })
   reply.send({ order: orderToJson(row) })
+})
+
+type PesapalCallbackQuery = {
+  OrderTrackingId?: string
+  OrderMerchantReference?: string
+  orderTrackingId?: string
+  orderMerchantReference?: string
+}
+
+function firstQueryString(v: string | string[] | undefined): string {
+  if (v == null) return ''
+  return Array.isArray(v) ? (v[0] ?? '') : v
+}
+
+app.get<{ Querystring: PesapalCallbackQuery }>('/api/payments/pesapal/callback', async (req, reply) => {
+  const q = req.query
+  const orderTrackingId = firstQueryString(q.OrderTrackingId ?? q.orderTrackingId)
+  const merchantRef = firstQueryString(q.OrderMerchantReference ?? q.orderMerchantReference)
+  if (!orderTrackingId || !merchantRef) {
+    return reply.code(400).send({ error: 'Missing payment callback parameters' })
+  }
+  try {
+    await applyPesapalPaymentToOrder(merchantRef, orderTrackingId)
+  } catch (e) {
+    app.log.error(e)
+  }
+  const customerApp = process.env.CUSTOMER_APP_URL?.trim()
+  if (!customerApp) {
+    return reply.code(500).send({ error: 'CUSTOMER_APP_URL is not configured' })
+  }
+  return reply.redirect(`${customerApp}/#/success/${encodeURIComponent(merchantRef)}`, 302)
+})
+
+type PesapalIpnBody = {
+  OrderTrackingId?: string
+  OrderMerchantReference?: string
+  orderTrackingId?: string
+  orderMerchantReference?: string
+}
+
+app.get<{ Querystring: PesapalCallbackQuery }>('/api/payments/pesapal/ipn', async (req, reply) => {
+  const q = req.query
+  const orderTrackingId = firstQueryString(q.OrderTrackingId ?? q.orderTrackingId)
+  const merchantRef = firstQueryString(q.OrderMerchantReference ?? q.orderMerchantReference)
+  if (!orderTrackingId || !merchantRef) {
+    return reply.code(400).send({ error: 'Missing IPN parameters' })
+  }
+  try {
+    await applyPesapalPaymentToOrder(merchantRef, orderTrackingId)
+  } catch (e) {
+    app.log.error(e)
+    return reply.code(500).send({
+      orderNotificationType: 'IPNCHANGE',
+      orderTrackingId,
+      orderMerchantReference: merchantRef,
+      status: 500,
+    })
+  }
+  return reply.send({
+    orderNotificationType: 'IPNCHANGE',
+    orderTrackingId,
+    orderMerchantReference: merchantRef,
+    status: 200,
+  })
+})
+
+app.post<{ Body: PesapalIpnBody }>('/api/payments/pesapal/ipn', async (req, reply) => {
+  const b = req.body ?? {}
+  const orderTrackingId = b.OrderTrackingId ?? b.orderTrackingId
+  const merchantRef = b.OrderMerchantReference ?? b.orderMerchantReference
+  if (!orderTrackingId || !merchantRef) {
+    return reply.code(400).send({ error: 'Missing IPN body' })
+  }
+  try {
+    await applyPesapalPaymentToOrder(merchantRef, orderTrackingId)
+  } catch (e) {
+    app.log.error(e)
+    return reply.code(500).send({
+      orderNotificationType: 'IPNCHANGE',
+      orderTrackingId,
+      orderMerchantReference: merchantRef,
+      status: 500,
+    })
+  }
+  return reply.send({
+    orderNotificationType: 'IPNCHANGE',
+    orderTrackingId,
+    orderMerchantReference: merchantRef,
+    status: 200,
+  })
 })
 
 app.get('/api/admin/overview', async (req, reply) => {
@@ -479,7 +717,8 @@ app.get<{ Querystring: AdminOrdersQuery }>('/api/admin/orders', async (req, repl
   values.push(limit)
   const { rows } = await pool.query<AdminOrderRow>(
     `SELECT
-      o.id, o.product_id, o.quantity, o.unit_price_ugx, o.total_ugx,
+      o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+      o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
       o.status, o.created_at,
       p.title AS package_title
@@ -512,7 +751,8 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
      FROM products p
      WHERE o.id = $2 AND p.id = o.product_id
      RETURNING
-       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.total_ugx,
+       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
+       o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
        o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
        o.status, o.created_at,
        p.title AS package_title`,
