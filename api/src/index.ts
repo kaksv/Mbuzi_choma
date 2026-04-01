@@ -105,6 +105,12 @@ function splitCustomerName(fullName: string): { firstName: string; lastName: str
   return { firstName: parts[0]!, lastName: parts.slice(1).join(' ') }
 }
 
+function maybeUuid(v: string): string | null {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+    ? v
+    : null
+}
+
 async function applyPesapalPaymentToOrder(orderId: string, orderTrackingId: string): Promise<void> {
   const st = await getPesapalTransactionStatus(orderTrackingId)
   if (st.merchantReference && st.merchantReference !== orderId) {
@@ -1029,6 +1035,7 @@ type UpdateOrderStatusBody = {
 app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
   const session = requireAnyPermission(req, reply, ['orders:write', 'orders:status:delivery'])
   if (!session) return
+  const actorUserId = maybeUuid(session.userId)
 
   const status = req.body?.status?.trim()
   if (!status || !isOrderStatus(status)) {
@@ -1097,7 +1104,7 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
        FROM updated u
        JOIN products p ON p.id = u.product_id
        LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-      [status, req.params.id, session.userId],
+      [status, req.params.id, actorUserId],
     )
     rows = result.rows
   } catch (e: unknown) {
@@ -1181,6 +1188,10 @@ app.get('/api/admin/debug/workflow', async (req, reply) => {
 app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, reply) => {
   const session = requireAnyPermission(req, reply, ['orders:delivery:write', 'orders:write'])
   if (!session) return
+  const actorUserId = maybeUuid(session.userId)
+  if (!actorUserId) {
+    return reply.code(403).send({ error: 'Delivery claim requires a signed-in user account (not shared admin key)' })
+  }
 
   const { rows } = await pool.query<AdminOrderRow>(
     `WITH base AS (
@@ -1222,7 +1233,7 @@ app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, 
      FROM updated u
      JOIN products p ON p.id = u.product_id
      LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-    [req.params.id, session.userId],
+    [req.params.id, actorUserId],
   )
   const row = rows[0]
   if (!row) return reply.code(409).send({ error: 'Order cannot be claimed (must be confirmed and unassigned or yours)' })
@@ -1239,6 +1250,12 @@ app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
   async (req, reply) => {
     const session = requireAnyPermission(req, reply, ['orders:delivery:write', 'orders:write'])
     if (!session) return
+    const actorUserId = maybeUuid(session.userId)
+    if (!actorUserId) {
+      return reply
+        .code(403)
+        .send({ error: 'Delivery status updates require a signed-in user account (not shared admin key)' })
+    }
     const status = req.body?.status?.trim() ?? ''
     const notes = req.body?.notes?.trim() ?? ''
     if (!isDeliveryStatus(status) || status === 'unassigned') {
@@ -1286,7 +1303,7 @@ app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
        FROM updated u
        JOIN products p ON p.id = u.product_id
        LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-      [status, notes, session.userId, req.params.id, canFullManage],
+      [status, notes, actorUserId, req.params.id, canFullManage],
     )
     const row = rows[0]
     if (!row) return reply.code(409).send({ error: 'Unable to update delivery status for this order' })
@@ -1302,14 +1319,20 @@ type VerifyDeliveryBody = {
 app.patch<{ Params: { id: string }; Body: VerifyDeliveryBody }>(
   '/api/admin/orders/:id/verify-delivery',
   async (req, reply) => {
-    if (!requirePermission(req, reply, 'orders:write')) return
+    const session = requirePermission(req, reply, 'orders:write')
+    if (!session) return
+    const actorUserId = maybeUuid(session.userId)
+    if (!actorUserId) {
+      return reply
+        .code(403)
+        .send({ error: 'Delivery verification requires a signed-in user account (not shared admin key)' })
+    }
     const outcome = req.body?.outcome?.trim() ?? ''
     const notes = req.body?.notes?.trim() ?? ''
     if (!isVerificationStatus(outcome) || outcome === 'pending_verification') {
       return reply.code(400).send({ error: 'Invalid verification outcome' })
     }
 
-    const session = authFromRequest(req)!
     const { rows } = await pool.query<AdminOrderRow>(
       `WITH updated AS (
          UPDATE orders o
@@ -1342,7 +1365,7 @@ app.patch<{ Params: { id: string }; Body: VerifyDeliveryBody }>(
        FROM updated u
        JOIN products p ON p.id = u.product_id
        LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-      [outcome, notes, session.userId, req.params.id],
+      [outcome, notes, actorUserId, req.params.id],
     )
     const row = rows[0]
     if (!row) return reply.code(409).send({ error: 'Only delivered/not_delivered orders can be verified' })
