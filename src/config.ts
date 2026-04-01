@@ -1,6 +1,6 @@
 export const SITE = {
   name: 'Mbuzzi Choma',
-  tagline: 'Fried goat meat packages (UGX)',
+  tagline: 'Goat choma · UGX',
   // Replace these with your real payment details.
   payment: {
     accountName: 'Mbuzzi Choma',

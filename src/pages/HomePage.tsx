@@ -1,13 +1,40 @@
 import { Suspense, use, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import PackageCard from '../components/PackageCard'
 import { AsyncErrorBoundary } from '../components/AsyncErrorBoundary'
+import { getHomeMenuFilter, type HomeMenuFilter } from '../lib/homeMenuFilter'
 import { HomeMenuSkeleton } from '../components/skeletons'
-import { SITE } from '../config'
 import { getProductsListResource, invalidateProductsListResource } from '../lib/asyncResources'
 import type { MeatPackage } from '../types/package'
 
-function HomeMenu({ packages, onSelect }: { packages: MeatPackage[]; onSelect: (id: string) => void }) {
+function HomeMenu({
+  packages,
+  onSelect,
+  filter,
+}: {
+  packages: MeatPackage[]
+  onSelect: (id: string) => void
+  filter: HomeMenuFilter
+}) {
+  if (packages.length === 0) {
+    return (
+      <div className="mt-4 rounded-2xl border border-black/5 bg-white p-5 text-center shadow-lg">
+        <p className="text-sm font-semibold text-slate-800">
+          {filter === 'popular' ? 'No “most ordered” picks right now.' : 'No packages to show.'}
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          {filter === 'popular' ? 'Switch to All goats or check back soon.' : 'Please try again later.'}
+        </p>
+        <Link
+          to="/"
+          className="mt-4 inline-block rounded-xl bg-orange-500 px-4 py-2 text-sm font-bold text-white"
+        >
+          All goats
+        </Link>
+      </div>
+    )
+  }
+
   return (
     <div className="mt-4 grid grid-cols-1 gap-4">
       {packages.map((pkg, i) => (
@@ -23,48 +50,34 @@ function HomeMenu({ packages, onSelect }: { packages: MeatPackage[]; onSelect: (
   )
 }
 
-function HomeMenuGate({ onSelect }: { onSelect: (id: string) => void }) {
-  const packages = use(getProductsListResource())
-  return <HomeMenu packages={packages} onSelect={onSelect} />
+function HomeMenuGate({
+  filter,
+  onSelect,
+}: {
+  filter: HomeMenuFilter
+  onSelect: (id: string) => void
+}) {
+  const all = use(getProductsListResource())
+  const packages = filter === 'popular' ? all.filter((p) => p.popular) : all
+  return <HomeMenu packages={packages} onSelect={onSelect} filter={filter} />
 }
 
 export default function HomePage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const filter = getHomeMenuFilter(searchParams)
   const [loadAttempt, setLoadAttempt] = useState(0)
 
   return (
     <div className="pb-4">
-      <section className="pt-6">
-        <div className="rounded-3xl border border-black/5 bg-gradient-to-br from-orange-100 via-white to-orange-50 p-5 shadow-lg">
-          <div className="flex items-start justify-between gap-4">
-            <div className="space-y-2">
-              <h1 className="text-2xl leading-tight font-black text-slate-900">Order {SITE.name}</h1>
-              <p className="text-sm text-slate-600">
-                Choose your fried goat meat package. Payments in <span className="font-bold">UGX</span>.
-              </p>
-              <div className="flex items-center gap-2 text-xs text-slate-600">
-                <span className="inline-flex items-center rounded-full border border-black/5 bg-white px-2 py-1">
-                  Mobile-friendly ordering
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+      <p className="pt-4 text-center text-sm font-semibold text-slate-600">Tap a pack to order</p>
 
-      <section className="mt-5">
-        <div className="flex items-end justify-between gap-3">
-          <div>
-            <h2 className="text-lg font-black text-slate-900">Package menu</h2>
-            <p className="text-sm text-slate-600">From quarter to bigger sizes.</p>
-          </div>
-        </div>
-
+      <section className="mt-1">
         <AsyncErrorBoundary
           key={loadAttempt}
           fallback={({ error }) => (
-            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm shadow-lg text-red-800">
-              <div className="font-bold">Couldn’t load packages</div>
+            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800 shadow-lg">
+              <div className="font-bold">Couldn’t load menu</div>
               <div className="mt-1">{error.message}</div>
               <button
                 type="button"
@@ -80,19 +93,18 @@ export default function HomePage() {
           )}
         >
           <Suspense fallback={<HomeMenuSkeleton count={4} />}>
-            <HomeMenuGate onSelect={(id) => void navigate(`/order/${id}`)} />
+            <HomeMenuGate filter={filter} onSelect={(id) => void navigate(`/order/${id}`)} />
           </Suspense>
         </AsyncErrorBoundary>
       </section>
 
       <section className="mt-6">
-        <div className="rounded-2xl border border-black/5 bg-white p-4 shadow-lg">
-          <div className="font-black text-slate-900">How it works</div>
-          <div className="mt-2 space-y-2 text-sm text-slate-700">
-            <div>1. Pick a package and quantity.</div>
-            <div>2. Pay in UGX using Mobile Money.</div>
-            <div>3. Send your Transaction ID, then you get your order.</div>
-          </div>
+        <div className="rounded-2xl border border-black/5 bg-white/80 p-4 text-sm text-slate-600 shadow-sm">
+          <div className="font-black text-slate-900">Quick guide</div>
+          <ul className="mt-2 space-y-1.5 text-xs">
+            <li>Choose pack → checkout → pay (mobile money or cash)</li>
+            <li>We confirm by WhatsApp / phone</li>
+          </ul>
         </div>
       </section>
     </div>
