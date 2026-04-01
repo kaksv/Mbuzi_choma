@@ -27,7 +27,7 @@ import {
 const MAX_QTY = 20
 const FULFILLMENT_TYPES = ['pickup', 'delivery', 'delivery_pending'] as const
 const PAYMENT_METHODS = ['pesapal', 'cash_on_delivery'] as const
-const ORDER_STATUSES = ['pending', 'confirmed', 'cancelled'] as const
+const ORDER_STATUSES = ['pending', 'processing', 'delivered', 'confirmed', 'cancelled'] as const
 const DELIVERY_STATUSES = ['unassigned', 'assigned', 'out_for_delivery', 'delivered', 'not_delivered'] as const
 const VERIFICATION_STATUSES = ['pending_verification', 'verified_delivered', 'verified_failed'] as const
 
@@ -1027,7 +1027,7 @@ type UpdateOrderStatusBody = {
 }
 
 app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
-  const session = requirePermission(req, reply, 'orders:write')
+  const session = requireAnyPermission(req, reply, ['orders:write', 'orders:status:delivery'])
   if (!session) return
 
   const status = req.body?.status?.trim()
@@ -1035,10 +1035,42 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
     return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
   }
 
+  const canFullManage = hasPermission(session, 'orders:write')
+  if (!canFullManage) {
+    if (status !== 'delivered') {
+      return reply.code(403).send({ error: 'Delivery personnel can only set status to delivered' })
+    }
+    const { rows: existingRows } = await pool.query<{
+      status: string
+      assigned_delivery_user_id: string | null
+      fulfillment_type: string
+    }>(
+      'SELECT status, assigned_delivery_user_id, fulfillment_type FROM orders WHERE id = $1::uuid LIMIT 1',
+      [req.params.id],
+    )
+    const existing = existingRows[0]
+    if (!existing) return reply.code(404).send({ error: 'Order not found' })
+    if (existing.status !== 'processing') {
+      return reply.code(409).send({ error: 'Only processing orders can be marked delivered' })
+    }
+    if (existing.fulfillment_type === 'pickup') {
+      return reply.code(409).send({ error: 'Pickup orders cannot be marked delivered by delivery personnel' })
+    }
+    if (existing.assigned_delivery_user_id !== session.userId) {
+      return reply.code(403).send({ error: 'You can only deliver orders assigned to you' })
+    }
+  }
+
   const { rows } = await pool.query<AdminOrderRow>(
     `WITH updated AS (
        UPDATE orders
-       SET status = $1
+       SET status = $1,
+           delivery_status = CASE WHEN $1 = 'delivered' THEN 'delivered' ELSE delivery_status END,
+           delivery_updated_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivery_updated_at END,
+           delivery_updated_by = CASE WHEN $1 = 'delivered' THEN $3::uuid ELSE delivery_updated_by END,
+           verification_status = CASE WHEN $1 = 'confirmed' THEN 'verified_delivered' ELSE verification_status END,
+           verified_at = CASE WHEN $1 = 'confirmed' THEN now() ELSE verified_at END,
+           verified_by = CASE WHEN $1 = 'confirmed' THEN $3::uuid ELSE verified_by END
        WHERE id = $2::uuid
        RETURNING
          id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
@@ -1063,7 +1095,7 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
      FROM updated u
      JOIN products p ON p.id = u.product_id
      LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-    [status, req.params.id],
+    [status, req.params.id, session.userId],
   )
 
   const row = rows[0]

@@ -18,7 +18,7 @@ const PERMISSIONS: Record<AdminRole, Set<string>> = {
     'orders:read',
     'orders:write',
   ]),
-  delivery_person: new Set(['overview:read', 'orders:read', 'orders:delivery:write']),
+  delivery_person: new Set(['overview:read', 'orders:read', 'orders:status:delivery', 'orders:delivery:write']),
 }
 
 export function hasPermission(session: AdminSession, permission: string): boolean {
