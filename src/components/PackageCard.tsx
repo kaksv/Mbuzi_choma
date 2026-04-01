@@ -1,6 +1,7 @@
 import type { MeatPackage } from '../types/package'
 import { resolveProductPhotoUrl } from '../lib/resolvePhotoUrl'
 import { formatUGX } from '../utils/formatUGX'
+import ProductImage from './ProductImage'
 
 type Props = {
   pkg: MeatPackage
@@ -11,17 +12,11 @@ export default function PackageCard({ pkg, onOrder }: Props) {
   return (
     <div className="bg-white rounded-2xl overflow-hidden shadow-lg border border-black/5">
       <div className="relative">
-        <img
+        <ProductImage
           src={resolveProductPhotoUrl(pkg.photoUrl)}
           alt={pkg.title}
+          aspectClassName="aspect-[4/3]"
           loading="lazy"
-          className="w-full aspect-[4/3] object-cover"
-          onError={(e) => {
-            const img = e.currentTarget
-            // Avoid infinite loops if the fallback also fails.
-            img.onerror = null
-            img.src = '/favicon.svg'
-          }}
         />
         {pkg.popular ? (
           <div className="absolute top-3 left-3 bg-orange-500 text-white text-xs font-bold px-2 py-1 rounded-full">
