@@ -1108,6 +1108,15 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
           "Order status transition failed due to outdated DB constraints. Run latest migrations on the API host.",
       })
     }
+    if (pg.code === '42703' || pg.code === '42P01') {
+      return reply.code(409).send({
+        error:
+          "Order workflow columns are missing in the database. Run latest migrations (especially 007 and 008) on the API host.",
+      })
+    }
+    if (pg.code === '22P02') {
+      return reply.code(400).send({ error: 'Invalid order id format' })
+    }
     throw e
   }
 
