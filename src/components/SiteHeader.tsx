@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router-dom'
 import { getHomeMenuFilter, menuListHref } from '../lib/homeMenuFilter'
 import { SITE } from '../config'
@@ -19,7 +20,7 @@ function HeaderMenuSearch() {
   const q = searchParams.get('q') ?? ''
 
   return (
-    <div className="relative min-w-0 flex-1">
+    <div className="relative min-w-0 w-full">
       <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">
         <SearchGlyph />
       </span>
@@ -58,33 +59,79 @@ export default function SiteHeader() {
   const filter = getHomeMenuFilter(searchParams)
   const onMenu = location.pathname === '/'
 
+  const [logoExpanded, setLogoExpanded] = useState(false)
+
+  useEffect(() => {
+    if (!onMenu) setLogoExpanded(false)
+  }, [onMenu])
+
   const tabBase =
     'relative flex min-h-10 flex-1 items-center justify-center rounded-xl px-2 py-2 text-center text-[13px] font-bold leading-tight transition'
 
   return (
     <header className="sticky top-0 z-20 border-b border-black/5 bg-white/90 backdrop-blur-md">
       <div className="mx-auto w-full max-w-md px-3 pt-3 pb-2">
-        <div className="flex items-center gap-2">
-          <Link
-            to={menuListHref(searchParams, 'all')}
-            className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-700 text-sm font-black text-white shadow-sm shadow-orange-600/25 outline-none ring-orange-400 focus-visible:ring-2"
-            aria-label={`${SITE.name} home`}
-          >
-            MZ
-          </Link>
+        {onMenu ? (
+          <>
+            <div className="flex items-stretch gap-2">
+              <div
+                className={`min-w-0 overflow-hidden transition-[opacity,flex] duration-200 ease-out ${
+                  logoExpanded ? 'pointer-events-none w-0 flex-[0] opacity-0' : 'flex-1 opacity-100'
+                }`}
+                aria-hidden={logoExpanded}
+              >
+                <Link
+                  to={menuListHref(searchParams, 'all')}
+                  className="block min-w-0 rounded-xl py-0.5 pr-1 outline-none ring-orange-400 focus-visible:ring-2"
+                >
+                  <div className="truncate font-black leading-tight text-slate-900">{SITE.name}</div>
+                  <div className="truncate text-[11px] font-semibold tracking-wide text-slate-500">
+                    {SITE.tagline}
+                  </div>
+                </Link>
+              </div>
 
-          {onMenu ? (
-            <HeaderMenuSearch />
-          ) : (
+              <button
+                type="button"
+                onClick={() => setLogoExpanded((v) => !v)}
+                aria-expanded={logoExpanded}
+                aria-label={
+                  logoExpanded
+                    ? 'Collapse logo and show Mbuzzi Choma title'
+                    : 'Expand logo (temporarily hide site title)'
+                }
+                className={`grid shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-700 text-sm font-black text-white shadow-sm shadow-orange-600/25 outline-none ring-orange-400 transition-all duration-200 ease-out focus-visible:ring-2 active:scale-[0.98] ${
+                  logoExpanded
+                    ? 'h-12 min-h-[3rem] flex-[1.15] min-w-0 px-4 text-base tracking-wide'
+                    : 'h-11 w-[25%] max-w-[4.75rem] min-w-[3.25rem]'
+                }`}
+              >
+                MZ
+              </button>
+            </div>
+
+            <div className="mt-2">
+              <HeaderMenuSearch />
+            </div>
+          </>
+        ) : (
+          <div className="flex items-center gap-2">
+            <Link
+              to={menuListHref(searchParams, 'all')}
+              className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-700 text-sm font-black text-white shadow-sm shadow-orange-600/25 outline-none ring-orange-400 focus-visible:ring-2"
+              aria-label={`${SITE.name} home`}
+            >
+              MZ
+            </Link>
             <Link
               to={menuListHref(searchParams, 'all')}
               className="min-w-0 flex-1 rounded-xl py-0.5 outline-none ring-orange-400 focus-visible:ring-2"
             >
-              <div className="truncate font-black text-slate-900 leading-tight">{SITE.name}</div>
+              <div className="truncate font-black leading-tight text-slate-900">{SITE.name}</div>
               <div className="truncate text-[11px] font-semibold tracking-wide text-slate-500">{SITE.tagline}</div>
             </Link>
-          )}
-        </div>
+          </div>
+        )}
 
         {onMenu ? (
           <nav
