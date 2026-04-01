@@ -174,7 +174,7 @@ function OrderPageLoaded({
                 window.location.href = result.pesapal.redirectUrl
                 return
               }
-              navigate(`/success/${result.order.id}`)
+              navigate(`/success/${result.order.id}`, { state: { order: result.order } })
             } catch (err: unknown) {
               setError(err instanceof Error ? err.message : 'Could not submit order.')
             } finally {

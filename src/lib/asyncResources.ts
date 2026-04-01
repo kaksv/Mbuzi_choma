@@ -1,10 +1,4 @@
-import {
-  fetchCheckoutConfig,
-  fetchOrder,
-  fetchProduct,
-  fetchProducts,
-} from './api'
-import type { MeatOrder } from '../types/order'
+import { fetchCheckoutConfig, fetchProduct, fetchProducts } from './api'
 import type { MeatPackage } from '../types/package'
 
 const cache = new Map<string, Promise<unknown>>()
@@ -45,12 +39,4 @@ export function getOrderPageBootstrapResource(packageId: string): Promise<OrderP
 
 export function invalidateOrderPageResource(packageId: string) {
   cache.delete(`orderPage:${packageId}`)
-}
-
-export function getOrderDetailResource(orderId: string): Promise<MeatOrder | null> {
-  return getOrCreate(`order:${orderId}`, () => fetchOrder(orderId))
-}
-
-export function invalidateOrderDetailResource(orderId: string) {
-  cache.delete(`order:${orderId}`)
 }

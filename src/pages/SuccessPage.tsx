@@ -1,11 +1,17 @@
-import { Suspense, use, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Suspense, use, useMemo, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { AsyncErrorBoundary } from '../components/AsyncErrorBoundary'
 import { SuccessPageSkeleton } from '../components/skeletons'
 import { SITE } from '../config'
-import { getOrderDetailResource, invalidateOrderDetailResource } from '../lib/asyncResources'
+import { fetchOrderWithRetry } from '../lib/api'
 import { formatUGX } from '../utils/formatUGX'
 import type { MeatOrder } from '../types/order'
+
+function orderFromLocationState(state: unknown): MeatOrder | undefined {
+  if (!state || typeof state !== 'object' || !('order' in state)) return undefined
+  const o = (state as { order: MeatOrder }).order
+  return o && typeof o.id === 'string' ? o : undefined
+}
 
 function buildWhatsappLink(text: string) {
   const raw = SITE.whatsappNumber.replace(/\D/g, '')
@@ -261,7 +267,17 @@ function SuccessGate({
   orderId: string
   navigate: ReturnType<typeof useNavigate>
 }) {
-  const order = use(getOrderDetailResource(orderId))
+  const location = useLocation()
+
+  const orderPromise = useMemo(() => {
+    const passed = orderFromLocationState(location.state)
+    if (passed && passed.id === orderId) {
+      return Promise.resolve(passed)
+    }
+    return fetchOrderWithRetry(orderId)
+  }, [orderId, location.state])
+
+  const order = use(orderPromise)
   if (!order) return <SuccessMissing navigate={navigate} />
   return <SuccessContent order={order} navigate={navigate} />
 }
@@ -286,10 +302,7 @@ export default function SuccessPage() {
             <button
               className="mt-4 w-full rounded-xl bg-black py-3 font-bold text-white"
               type="button"
-              onClick={() => {
-                invalidateOrderDetailResource(orderId)
-                setLoadAttempt((n) => n + 1)
-              }}
+              onClick={() => setLoadAttempt((n) => n + 1)}
             >
               Retry
             </button>

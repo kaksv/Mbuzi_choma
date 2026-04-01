@@ -71,3 +71,17 @@ export async function fetchOrder(id: string): Promise<MeatOrder | null> {
   const data = (await r.json()) as { order: MeatOrder }
   return data.order
 }
+
+/** Retries after create — avoids blank success when GET races the commit or cache returned a stale null. */
+export async function fetchOrderWithRetry(id: string): Promise<MeatOrder | null> {
+  const maxAttempts = 8
+  const baseMs = 200
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const order = await fetchOrder(id)
+    if (order) return order
+    if (attempt < maxAttempts - 1) {
+      await new Promise((r) => setTimeout(r, baseMs * (attempt + 1)))
+    }
+  }
+  return null
+}
