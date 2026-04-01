@@ -129,6 +129,15 @@ function headerValue(v: string | string[] | undefined): string {
 }
 
 function authFromRequest(req: FastifyRequest): AdminSession | null {
+  const auth = headerValue(req.headers.authorization)
+  const m = auth.match(/^Bearer\s+(.+)$/i)
+  if (m) {
+    const secret = process.env.ADMIN_JWT_SECRET?.trim()
+    if (!secret) return null
+    const session = verifyAdminToken(m[1]!, secret)
+    if (session) return session
+  }
+
   const adminKey = process.env.ADMIN_API_KEY?.trim()
   const providedKey = headerValue(req.headers['x-admin-key']).trim()
   if (adminKey && providedKey && providedKey === adminKey) {
@@ -139,13 +148,7 @@ function authFromRequest(req: FastifyRequest): AdminSession | null {
       role: 'owner',
     }
   }
-
-  const auth = headerValue(req.headers.authorization)
-  const m = auth.match(/^Bearer\s+(.+)$/i)
-  if (!m) return null
-  const secret = process.env.ADMIN_JWT_SECRET?.trim()
-  if (!secret) return null
-  return verifyAdminToken(m[1]!, secret)
+  return null
 }
 
 function requirePermission(req: FastifyRequest, reply: FastifyReply, permission: string): AdminSession | null {
@@ -1208,7 +1211,7 @@ app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, 
            delivery_updated_by = $2::uuid
        FROM base b
        WHERE o.id = b.id
-         AND b.status = 'confirmed'
+         AND b.status = 'processing'
          AND (b.assigned_delivery_user_id IS NULL OR b.assigned_delivery_user_id = $2::uuid)
        RETURNING
          o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
@@ -1236,7 +1239,7 @@ app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, 
     [req.params.id, actorUserId],
   )
   const row = rows[0]
-  if (!row) return reply.code(409).send({ error: 'Order cannot be claimed (must be confirmed and unassigned or yours)' })
+  if (!row) return reply.code(409).send({ error: 'Order cannot be claimed (must be processing and unassigned or already yours)' })
   reply.send({ order: orderToJson(row) })
 })
 
