@@ -1,6 +1,15 @@
 import cors from '@fastify/cors'
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify'
 import { v2 as cloudinary } from 'cloudinary'
+import {
+  hasPermission,
+  hashPassword,
+  signAdminToken,
+  verifyAdminToken,
+  verifyPassword,
+  type AdminRole,
+  type AdminSession,
+} from './adminAuth.js'
 import { pool } from './db.js'
 import {
   getPesapalTransactionStatus,
@@ -30,6 +39,17 @@ type AdminProductRow = ProductRow & {
 
 type AdminOrderRow = OrderRow & {
   package_title: string
+}
+
+type AdminUserRow = {
+  id: string
+  email: string
+  full_name: string
+  password_hash: string
+  role: AdminRole
+  active: boolean
+  created_at: Date
+  updated_at: Date
 }
 
 function adminProductToJson(p: AdminProductRow) {
@@ -87,16 +107,42 @@ async function applyPesapalPaymentToOrder(orderId: string, orderTrackingId: stri
   )
 }
 
-function requireAdmin(req: FastifyRequest, reply: FastifyReply): boolean {
-  const configured = process.env.ADMIN_API_KEY?.trim()
-  if (!configured) return true
+function headerValue(v: string | string[] | undefined): string {
+  if (!v) return ''
+  return Array.isArray(v) ? (v[0] ?? '') : v
+}
 
-  const header = req.headers['x-admin-key']
-  const provided = (Array.isArray(header) ? header[0] : header)?.trim()
-  if (provided === configured) return true
+function authFromRequest(req: FastifyRequest): AdminSession | null {
+  const adminKey = process.env.ADMIN_API_KEY?.trim()
+  const providedKey = headerValue(req.headers['x-admin-key']).trim()
+  if (adminKey && providedKey && providedKey === adminKey) {
+    return {
+      userId: 'legacy-admin-key',
+      email: 'legacy-admin@local',
+      fullName: 'Legacy Admin Key',
+      role: 'owner',
+    }
+  }
 
-  reply.code(401).send({ error: 'Unauthorized' })
-  return false
+  const auth = headerValue(req.headers.authorization)
+  const m = auth.match(/^Bearer\s+(.+)$/i)
+  if (!m) return null
+  const secret = process.env.ADMIN_JWT_SECRET?.trim()
+  if (!secret) return null
+  return verifyAdminToken(m[1]!, secret)
+}
+
+function requirePermission(req: FastifyRequest, reply: FastifyReply, permission: string): AdminSession | null {
+  const session = authFromRequest(req)
+  if (!session) {
+    reply.code(401).send({ error: 'Unauthorized' })
+    return null
+  }
+  if (!hasPermission(session, permission)) {
+    reply.code(403).send({ error: 'Forbidden' })
+    return null
+  }
+  return session
 }
 
 function cloudinaryConfig() {
@@ -112,7 +158,7 @@ const app = Fastify({ logger: true })
 await app.register(cors, {
   origin: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'x-admin-key'],
+  allowedHeaders: ['Content-Type', 'x-admin-key', 'Authorization'],
 })
 
 app.get('/api/health', async () => ({ ok: true }))
@@ -422,8 +468,166 @@ app.post<{ Body: PesapalIpnBody }>('/api/payments/pesapal/ipn', async (req, repl
   })
 })
 
+type AdminLoginBody = {
+  email?: string
+  password?: string
+}
+
+app.post<{ Body: AdminLoginBody }>('/api/admin/auth/login', async (req, reply) => {
+  const email = req.body?.email?.trim().toLowerCase()
+  const password = req.body?.password ?? ''
+  if (!email || !password) {
+    return reply.code(400).send({ error: 'email and password are required' })
+  }
+
+  const { rows } = await pool.query<AdminUserRow>(
+    `SELECT id, email, full_name, password_hash, role, active, created_at, updated_at
+     FROM admin_users WHERE email = $1 LIMIT 1`,
+    [email],
+  )
+  const user = rows[0]
+  if (!user || !user.active || !verifyPassword(password, user.password_hash)) {
+    return reply.code(401).send({ error: 'Invalid credentials' })
+  }
+
+  const secret = process.env.ADMIN_JWT_SECRET?.trim()
+  if (!secret) {
+    return reply.code(503).send({ error: 'ADMIN_JWT_SECRET is not configured' })
+  }
+
+  const token = signAdminToken(
+    { userId: user.id, email: user.email, fullName: user.full_name, role: user.role },
+    secret,
+  )
+
+  reply.send({
+    token,
+    user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role },
+  })
+})
+
+type BootstrapOwnerBody = { email?: string; fullName?: string; password?: string }
+
+app.post<{ Body: BootstrapOwnerBody }>('/api/admin/auth/bootstrap-owner', async (req, reply) => {
+  const adminKey = process.env.ADMIN_API_KEY?.trim()
+  const providedKey = headerValue(req.headers['x-admin-key']).trim()
+  if (!adminKey || providedKey !== adminKey) {
+    return reply.code(401).send({ error: 'Unauthorized' })
+  }
+
+  const email = req.body?.email?.trim().toLowerCase()
+  const fullName = req.body?.fullName?.trim()
+  const password = req.body?.password ?? ''
+  if (!email || !fullName || password.length < 8) {
+    return reply.code(400).send({ error: 'email, fullName and password(min 8 chars) are required' })
+  }
+
+  const { rows: countRows } = await pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM admin_users')
+  if (Number(countRows[0]?.count ?? '0') > 0) {
+    return reply.code(409).send({ error: 'Owner bootstrap already completed' })
+  }
+
+  const passwordHash = hashPassword(password)
+  const { rows } = await pool.query<AdminUserRow>(
+    `INSERT INTO admin_users (email, full_name, password_hash, role, active)
+     VALUES ($1, $2, $3, 'owner', true)
+     RETURNING id, email, full_name, password_hash, role, active, created_at, updated_at`,
+    [email, fullName, passwordHash],
+  )
+  const user = rows[0]
+  reply.code(201).send({ user: { id: user.id, email: user.email, fullName: user.full_name, role: user.role } })
+})
+
+type CreateAdminUserBody = { email?: string; fullName?: string; password?: string; role?: AdminRole }
+
+app.get('/api/admin/users', async (req, reply) => {
+  if (!requirePermission(req, reply, 'users:manage')) return
+  const { rows } = await pool.query<AdminUserRow>(
+    `SELECT id, email, full_name, password_hash, role, active, created_at, updated_at
+     FROM admin_users ORDER BY created_at DESC`,
+  )
+  reply.send({
+    users: rows.map((u) => ({
+      id: u.id,
+      email: u.email,
+      fullName: u.full_name,
+      role: u.role,
+      active: u.active,
+      createdAtISO: u.created_at.toISOString(),
+      updatedAtISO: u.updated_at.toISOString(),
+    })),
+  })
+})
+
+app.post<{ Body: CreateAdminUserBody }>('/api/admin/users', async (req, reply) => {
+  if (!requirePermission(req, reply, 'users:manage')) return
+  const email = req.body?.email?.trim().toLowerCase()
+  const fullName = req.body?.fullName?.trim()
+  const password = req.body?.password ?? ''
+  const role = req.body?.role
+  if (!email || !fullName || password.length < 8 || !role) {
+    return reply.code(400).send({ error: 'email, fullName, role and password(min 8 chars) are required' })
+  }
+  if (!['owner', 'ops_manager', 'delivery_person'].includes(role)) {
+    return reply.code(400).send({ error: 'Invalid role' })
+  }
+
+  const { rows } = await pool.query<AdminUserRow>(
+    `INSERT INTO admin_users (email, full_name, password_hash, role, active)
+     VALUES ($1, $2, $3, $4, true)
+     RETURNING id, email, full_name, password_hash, role, active, created_at, updated_at`,
+    [email, fullName, hashPassword(password), role],
+  )
+  const u = rows[0]
+  reply.code(201).send({ user: { id: u.id, email: u.email, fullName: u.full_name, role: u.role, active: u.active } })
+})
+
+type UpdateAdminUserBody = { fullName?: string; role?: AdminRole; active?: boolean; password?: string }
+
+app.patch<{ Params: { id: string }; Body: UpdateAdminUserBody }>('/api/admin/users/:id', async (req, reply) => {
+  if (!requirePermission(req, reply, 'users:manage')) return
+  const { fullName, role, active, password } = req.body ?? {}
+  const sets: string[] = []
+  const values: Array<string | boolean> = []
+  if (fullName !== undefined) {
+    const t = fullName.trim()
+    if (!t) return reply.code(400).send({ error: 'fullName cannot be empty' })
+    values.push(t)
+    sets.push(`full_name = $${values.length}`)
+  }
+  if (role !== undefined) {
+    if (!['owner', 'ops_manager', 'delivery_person'].includes(role)) {
+      return reply.code(400).send({ error: 'Invalid role' })
+    }
+    values.push(role)
+    sets.push(`role = $${values.length}`)
+  }
+  if (active !== undefined) {
+    values.push(active)
+    sets.push(`active = $${values.length}`)
+  }
+  if (password !== undefined) {
+    if (password.length < 8) return reply.code(400).send({ error: 'password must be at least 8 characters' })
+    values.push(hashPassword(password))
+    sets.push(`password_hash = $${values.length}`)
+  }
+  if (sets.length === 0) return reply.code(400).send({ error: 'No fields to update' })
+
+  values.push(req.params.id)
+  const { rows } = await pool.query<AdminUserRow>(
+    `UPDATE admin_users
+     SET ${sets.join(', ')}, updated_at = now()
+     WHERE id = $${values.length}::uuid
+     RETURNING id, email, full_name, password_hash, role, active, created_at, updated_at`,
+    values,
+  )
+  const u = rows[0]
+  if (!u) return reply.code(404).send({ error: 'User not found' })
+  reply.send({ user: { id: u.id, email: u.email, fullName: u.full_name, role: u.role, active: u.active } })
+})
+
 app.get('/api/admin/overview', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'overview:read')) return
 
   const [{ rows: productsRows }, { rows: ordersTodayRows }, { rows: pendingRows }] = await Promise.all([
     pool.query<{ count: string }>('SELECT COUNT(*)::text AS count FROM products WHERE active = true AND deleted_at IS NULL'),
@@ -442,7 +646,7 @@ app.get('/api/admin/overview', async (req, reply) => {
 })
 
 app.get('/api/admin/products', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:read')) return
 
   const { rows } = await pool.query<AdminProductRow>(
     `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at
@@ -467,7 +671,7 @@ type CreateProductBody = {
 }
 
 app.post<{ Body: CreateProductBody }>('/api/admin/products', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const id = req.body?.id?.trim()
   const title = req.body?.title?.trim()
@@ -513,7 +717,7 @@ type UpdateProductBody = {
 }
 
 app.patch<{ Params: { id: string }; Body: UpdateProductBody }>('/api/admin/products/:id', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const { title, weightKg, priceUGX, photoUrl, popular, active } = req.body ?? {}
   const sets: string[] = []
@@ -586,7 +790,7 @@ type CloudinarySignBody = {
 }
 
 app.post<{ Body: CloudinarySignBody }>('/api/admin/cloudinary/sign', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const cfg = cloudinaryConfig()
   if (!cfg) {
@@ -625,7 +829,7 @@ app.post<{ Body: CloudinarySignBody }>('/api/admin/cloudinary/sign', async (req,
 })
 
 app.get('/api/admin/products/trash', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:read')) return
 
   const { rows } = await pool.query<AdminProductRow>(
     `SELECT id, title, weight_kg::text, price_ugx, photo_url, popular, active, updated_at, deleted_at
@@ -638,7 +842,7 @@ app.get('/api/admin/products/trash', async (req, reply) => {
 })
 
 app.delete<{ Params: { id: string } }>('/api/admin/products/:id', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const { rows } = await pool.query<AdminProductRow>(
     `UPDATE products
@@ -654,7 +858,7 @@ app.delete<{ Params: { id: string } }>('/api/admin/products/:id', async (req, re
 })
 
 app.post<{ Params: { id: string } }>('/api/admin/products/:id/restore', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const { rows } = await pool.query<AdminProductRow>(
     `UPDATE products
@@ -670,7 +874,7 @@ app.post<{ Params: { id: string } }>('/api/admin/products/:id/restore', async (r
 })
 
 app.delete<{ Params: { id: string } }>('/api/admin/products/:id/permanent', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'products:write')) return
 
   const { rows: refs } = await pool.query<{ count: string }>(
     'SELECT COUNT(*)::text AS count FROM orders WHERE product_id = $1',
@@ -695,7 +899,7 @@ type AdminOrdersQuery = {
 }
 
 app.get<{ Querystring: AdminOrdersQuery }>('/api/admin/orders', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'orders:read')) return
 
   const status = req.query.status?.trim()
   const limitRaw = req.query.limit?.trim()
@@ -738,7 +942,7 @@ type UpdateOrderStatusBody = {
 }
 
 app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
-  if (!requireAdmin(req, reply)) return
+  if (!requirePermission(req, reply, 'orders:write')) return
 
   const status = req.body?.status?.trim()
   if (!status || !isOrderStatus(status)) {
@@ -746,16 +950,24 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
   }
 
   const { rows } = await pool.query<AdminOrderRow>(
-    `UPDATE orders o
-     SET status = $1
-     FROM products p
-     WHERE o.id = $2 AND p.id = o.product_id
-     RETURNING
-       o.id, o.product_id, o.quantity, o.unit_price_ugx, o.subtotal_ugx, o.delivery_fee_ugx, o.total_ugx,
-       o.fulfillment_type, o.payment_method, o.payment_status, o.pesapal_order_tracking_id,
-       o.customer_full_name, o.customer_phone, o.customer_location, o.customer_notes, o.transaction_ref,
-       o.status, o.created_at,
-       p.title AS package_title`,
+    `WITH updated AS (
+       UPDATE orders
+       SET status = $1
+       WHERE id = $2::uuid
+       RETURNING
+         id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
+         fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
+         customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
+         status, created_at
+     )
+     SELECT
+       u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
+       u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+       u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
+       u.status, u.created_at,
+       p.title AS package_title
+     FROM updated u
+     JOIN products p ON p.id = u.product_id`,
     [status, req.params.id],
   )
 
