@@ -1125,6 +1125,59 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
   reply.send({ order: orderToJson(row) })
 })
 
+app.get('/api/admin/debug/workflow', async (req, reply) => {
+  if (!requirePermission(req, reply, 'users:manage')) return
+
+  const [migrationsRes, constraintRes, columnsRes] = await Promise.all([
+    pool.query<{ filename: string; applied_at: Date }>(
+      `SELECT filename, applied_at
+       FROM schema_migrations
+       WHERE filename IN ('006_admin_rbac.sql', '007_delivery_workflow.sql', '008_order_status_workflow.sql')
+       ORDER BY filename`,
+    ),
+    pool.query<{ constraint_name: string; constraint_def: string }>(
+      `SELECT con.conname AS constraint_name,
+              pg_get_constraintdef(con.oid) AS constraint_def
+       FROM pg_constraint con
+       JOIN pg_class rel ON rel.oid = con.conrelid
+       JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+       WHERE rel.relname = 'orders'
+         AND nsp.nspname = 'public'
+         AND con.contype = 'c'
+         AND con.conname = 'orders_status_check'`,
+    ),
+    pool.query<{ column_name: string }>(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = 'orders'
+         AND column_name IN (
+           'assigned_delivery_user_id',
+           'assigned_at',
+           'delivery_status',
+           'delivery_notes',
+           'delivery_updated_at',
+           'delivery_updated_by',
+           'verification_status',
+           'verification_notes',
+           'verified_at',
+           'verified_by'
+         )
+       ORDER BY column_name`,
+    ),
+  ])
+
+  reply.send({
+    expectedOrderStatuses: ORDER_STATUSES,
+    appliedWorkflowMigrations: migrationsRes.rows.map((r) => ({
+      filename: r.filename,
+      appliedAtISO: r.applied_at.toISOString(),
+    })),
+    orderStatusConstraint: constraintRes.rows[0]?.constraint_def ?? null,
+    workflowColumnsPresent: columnsRes.rows.map((r) => r.column_name),
+  })
+})
+
 app.post<{ Params: { id: string } }>('/api/admin/orders/:id/claim', async (req, reply) => {
   const session = requireAnyPermission(req, reply, ['orders:delivery:write', 'orders:write'])
   if (!session) return
