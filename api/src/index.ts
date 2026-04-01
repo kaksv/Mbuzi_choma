@@ -1274,11 +1274,16 @@ app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
       `WITH updated AS (
          UPDATE orders o
          SET delivery_status = $1,
+            status = CASE
+              WHEN $1 = 'delivered' THEN 'delivered'
+              WHEN $1 = 'not_delivered' THEN 'cancelled'
+              ELSE o.status
+            END,
              delivery_notes = CASE WHEN $2 = '' THEN o.delivery_notes ELSE $2 END,
              delivery_updated_at = now(),
              delivery_updated_by = $3::uuid
          WHERE o.id = $4::uuid
-           AND o.status = 'confirmed'
+          AND o.status = 'processing'
            AND (
              $5::boolean = true
              OR o.assigned_delivery_user_id = $3::uuid
@@ -1309,7 +1314,7 @@ app.patch<{ Params: { id: string }; Body: UpdateDeliveryStatusBody }>(
       [status, notes, actorUserId, req.params.id, canFullManage],
     )
     const row = rows[0]
-    if (!row) return reply.code(409).send({ error: 'Unable to update delivery status for this order' })
+    if (!row) return reply.code(409).send({ error: 'Unable to update delivery status for this order (must be processing and assigned to you)' })
     reply.send({ order: orderToJson(row) })
   },
 )
