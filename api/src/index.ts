@@ -1061,42 +1061,55 @@ app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/o
     }
   }
 
-  const { rows } = await pool.query<AdminOrderRow>(
-    `WITH updated AS (
-       UPDATE orders
-       SET status = $1,
-           delivery_status = CASE WHEN $1 = 'delivered' THEN 'delivered' ELSE delivery_status END,
-           delivery_updated_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivery_updated_at END,
-           delivery_updated_by = CASE WHEN $1 = 'delivered' THEN $3::uuid ELSE delivery_updated_by END,
-           verification_status = CASE WHEN $1 = 'confirmed' THEN 'verified_delivered' ELSE verification_status END,
-           verified_at = CASE WHEN $1 = 'confirmed' THEN now() ELSE verified_at END,
-           verified_by = CASE WHEN $1 = 'confirmed' THEN $3::uuid ELSE verified_by END
-       WHERE id = $2::uuid
-       RETURNING
-         id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
-         fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
-         assigned_delivery_user_id, assigned_at, delivery_status, delivery_notes,
-         delivery_updated_at, delivery_updated_by,
-         verification_status, verified_at, verified_by, verification_notes,
-         customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
-         status, created_at
-     )
-     SELECT
-       u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
-       u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
-       u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
-       u.delivery_updated_at, u.delivery_updated_by,
-       u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
-       du.full_name AS assigned_delivery_full_name,
-       du.email AS assigned_delivery_email,
-       u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
-       u.status, u.created_at,
-       p.title AS package_title
-     FROM updated u
-     JOIN products p ON p.id = u.product_id
-     LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
-    [status, req.params.id, session.userId],
-  )
+  let rows: AdminOrderRow[]
+  try {
+    const result = await pool.query<AdminOrderRow>(
+      `WITH updated AS (
+         UPDATE orders
+         SET status = $1,
+             delivery_status = CASE WHEN $1 = 'delivered' THEN 'delivered' ELSE delivery_status END,
+             delivery_updated_at = CASE WHEN $1 = 'delivered' THEN now() ELSE delivery_updated_at END,
+             delivery_updated_by = CASE WHEN $1 = 'delivered' THEN $3::uuid ELSE delivery_updated_by END,
+             verification_status = CASE WHEN $1 = 'confirmed' THEN 'verified_delivered' ELSE verification_status END,
+             verified_at = CASE WHEN $1 = 'confirmed' THEN now() ELSE verified_at END,
+             verified_by = CASE WHEN $1 = 'confirmed' THEN $3::uuid ELSE verified_by END
+         WHERE id = $2::uuid
+         RETURNING
+           id, product_id, quantity, unit_price_ugx, subtotal_ugx, delivery_fee_ugx, total_ugx,
+           fulfillment_type, payment_method, payment_status, pesapal_order_tracking_id,
+           assigned_delivery_user_id, assigned_at, delivery_status, delivery_notes,
+           delivery_updated_at, delivery_updated_by,
+           verification_status, verified_at, verified_by, verification_notes,
+           customer_full_name, customer_phone, customer_location, customer_notes, transaction_ref,
+           status, created_at
+       )
+       SELECT
+         u.id, u.product_id, u.quantity, u.unit_price_ugx, u.subtotal_ugx, u.delivery_fee_ugx, u.total_ugx,
+         u.fulfillment_type, u.payment_method, u.payment_status, u.pesapal_order_tracking_id,
+         u.assigned_delivery_user_id, u.assigned_at, u.delivery_status, u.delivery_notes,
+         u.delivery_updated_at, u.delivery_updated_by,
+         u.verification_status, u.verified_at, u.verified_by, u.verification_notes,
+         du.full_name AS assigned_delivery_full_name,
+         du.email AS assigned_delivery_email,
+         u.customer_full_name, u.customer_phone, u.customer_location, u.customer_notes, u.transaction_ref,
+         u.status, u.created_at,
+         p.title AS package_title
+       FROM updated u
+       JOIN products p ON p.id = u.product_id
+       LEFT JOIN admin_users du ON du.id = u.assigned_delivery_user_id`,
+      [status, req.params.id, session.userId],
+    )
+    rows = result.rows
+  } catch (e: unknown) {
+    const pg = e as { code?: string; constraint?: string; message?: string }
+    if (pg.code === '23514') {
+      return reply.code(409).send({
+        error:
+          "Order status transition failed due to outdated DB constraints. Run latest migrations on the API host.",
+      })
+    }
+    throw e
+  }
 
   const row = rows[0]
   if (!row) return reply.code(404).send({ error: 'Order not found' })
