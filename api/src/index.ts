@@ -145,6 +145,23 @@ function requirePermission(req: FastifyRequest, reply: FastifyReply, permission:
   return session
 }
 
+function requireAnyPermission(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  permissions: string[],
+): AdminSession | null {
+  const session = authFromRequest(req)
+  if (!session) {
+    reply.code(401).send({ error: 'Unauthorized' })
+    return null
+  }
+  if (!permissions.some((p) => hasPermission(session, p))) {
+    reply.code(403).send({ error: 'Forbidden' })
+    return null
+  }
+  return session
+}
+
 function cloudinaryConfig() {
   const cloudName = process.env.CLOUDINARY_CLOUD_NAME?.trim()
   const apiKey = process.env.CLOUDINARY_API_KEY?.trim()
@@ -585,8 +602,41 @@ app.post<{ Body: CreateAdminUserBody }>('/api/admin/users', async (req, reply) =
 type UpdateAdminUserBody = { fullName?: string; role?: AdminRole; active?: boolean; password?: string }
 
 app.patch<{ Params: { id: string }; Body: UpdateAdminUserBody }>('/api/admin/users/:id', async (req, reply) => {
-  if (!requirePermission(req, reply, 'users:manage')) return
+  const session = requirePermission(req, reply, 'users:manage')
+  if (!session) return
   const { fullName, role, active, password } = req.body ?? {}
+
+  const { rows: currentRows } = await pool.query<AdminUserRow>(
+    `SELECT id, email, full_name, password_hash, role, active, created_at, updated_at
+     FROM admin_users
+     WHERE id = $1::uuid
+     LIMIT 1`,
+    [req.params.id],
+  )
+  const current = currentRows[0]
+  if (!current) return reply.code(404).send({ error: 'User not found' })
+
+  // Guardrail: avoid locking yourself out accidentally.
+  if (session.userId === current.id && active === false) {
+    return reply.code(409).send({ error: 'You cannot deactivate your own account' })
+  }
+
+  const removesOwnerPrivileges =
+    current.role === 'owner' && ((role !== undefined && role !== 'owner') || (active !== undefined && active === false))
+  if (removesOwnerPrivileges) {
+    const { rows: ownerRows } = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM admin_users
+       WHERE role = 'owner' AND active = true AND id <> $1::uuid`,
+      [current.id],
+    )
+    if (Number(ownerRows[0]?.count ?? '0') < 1) {
+      return reply
+        .code(409)
+        .send({ error: 'Cannot remove or deactivate the last active owner account' })
+    }
+  }
+
   const sets: string[] = []
   const values: Array<string | boolean> = []
   if (fullName !== undefined) {
@@ -942,11 +992,28 @@ type UpdateOrderStatusBody = {
 }
 
 app.patch<{ Params: { id: string }; Body: UpdateOrderStatusBody }>('/api/admin/orders/:id/status', async (req, reply) => {
-  if (!requirePermission(req, reply, 'orders:write')) return
+  const session = requireAnyPermission(req, reply, ['orders:write', 'orders:status:delivery'])
+  if (!session) return
 
   const status = req.body?.status?.trim()
   if (!status || !isOrderStatus(status)) {
     return reply.code(400).send({ error: `status must be one of: ${ORDER_STATUSES.join(', ')}` })
+  }
+
+  const canFullManage = hasPermission(session, 'orders:write')
+  if (!canFullManage) {
+    if (status !== 'confirmed') {
+      return reply.code(403).send({ error: 'Delivery personnel can only mark orders as confirmed' })
+    }
+    const { rows: existingRows } = await pool.query<{ status: string }>(
+      'SELECT status FROM orders WHERE id = $1::uuid LIMIT 1',
+      [req.params.id],
+    )
+    const existing = existingRows[0]
+    if (!existing) return reply.code(404).send({ error: 'Order not found' })
+    if (existing.status !== 'pending') {
+      return reply.code(409).send({ error: 'Only pending orders can be confirmed by delivery personnel' })
+    }
   }
 
   const { rows } = await pool.query<AdminOrderRow>(
